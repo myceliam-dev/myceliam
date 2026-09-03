@@ -1,0 +1,37 @@
+# Example: restricting who can write the AutoidpAllowlist singleton
+# (myceliam-system/default). This is deliberately NOT applied by
+# kustomization.yaml — it names a specific group/subject you must edit for
+# your own cluster's identity setup. The operator's own ClusterRole
+# (rbac.yaml) only ever gets read access to this resource; controlling who
+# can create/update it here IS the actual security boundary for the
+# namespace-allowlist feature (see AutoidpAllowlist's doc comment in api/v1).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: myceliam-autoidp-allowlist-admin
+  namespace: myceliam-system
+rules:
+  - apiGroups: ["myceliam.io"]
+    resources: ["autoidpallowlists"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    # Intentionally no "delete" — removing the singleton entirely reverts to
+    # "every namespace allowed" (see AutoidpAllowlist's doc comment), which is
+    # a bigger behavior change than editing its namespace list and deserves
+    # its own, more deliberate action.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: myceliam-autoidp-allowlist-admin
+  namespace: myceliam-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: myceliam-autoidp-allowlist-admin
+subjects:
+  # Replace with whichever group/users/service accounts your cluster trusts
+  # to decide which namespaces may use myceliam — e.g. a platform-team group
+  # from your OIDC/RBAC integration.
+  - kind: Group
+    name: platform-admins
+    apiGroup: rbac.authorization.k8s.io

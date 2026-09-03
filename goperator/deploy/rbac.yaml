@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: myceliam-operator
+  namespace: myceliam-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: myceliam-operator
+rules:
+  # Watches ServiceAccounts cluster-wide for the myceliam.io/autoidp=true label.
+  # "update" is for finalizer add/remove (controllerutil.AddFinalizer/RemoveFinalizer
+  # + Client.Update); "patch" is for the myceliam.io/last-reconciled-state
+  # annotation write (a merge-patch, so it doesn't race a concurrent finalizer
+  # update the way a second full-object Update would).
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  # Reads/writes each ServiceAccount's <name>-oidc-credentials secret (client
+  # secret, or a generated/provided signedjwt keypair), in any namespace a
+  # labeled ServiceAccount may live in.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Watches Namespaces cluster-wide so their Keycloak realm can be torn down
+  # when the namespace itself is deleted. "update" is required even though
+  # nothing here ever deletes a Namespace: NamespaceReconciler attaches its
+  # own finalizer to every Namespace (see deps.go's finalizerName) and needs
+  # "update" to add/remove it — without it, every Namespace delete would hang
+  # in Terminating forever.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "update"]
+  # Watches AwsAccessProfile/GcpAccessProfile CRs for cloud IdP federation, and
+  # deregisters the IdP/WLI provider when one is deleted. Same finalizer/"update"
+  # requirement as namespaces above.
+  - apiGroups: ["myceliam.io"]
+    resources: ["awsaccessprofiles", "gcpaccessprofiles"]
+    verbs: ["get", "list", "watch", "update"]
+  # Reads the singleton AutoidpAllowlist (myceliam-system/default) that gates
+  # which namespaces get provisioned, and pokes autoidp=true ServiceAccounts
+  # (via the serviceaccounts "patch" above) when it changes. Deliberately no
+  # write access here — restricting who CAN write it is the actual security
+  # boundary for this feature, via a separate Role/RoleBinding scoped to
+  # myceliam-system; see deploy/rbac-allowlist-example.yaml.
+  - apiGroups: ["myceliam.io"]
+    resources: ["autoidpallowlists"]
+    verbs: ["get", "list", "watch"]
+  # Kubernetes Events for reconcile progress/errors — not yet emitted by this
+  # port (it logs structured events instead, see internal/controller/result.go),
+  # kept here so adding an EventRecorder later doesn't require an RBAC change.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: myceliam-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: myceliam-operator
+subjects:
+  - kind: ServiceAccount
+    name: myceliam-operator
+    namespace: myceliam-system

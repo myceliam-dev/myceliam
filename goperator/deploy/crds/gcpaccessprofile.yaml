@@ -1,0 +1,44 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: gcpaccessprofiles.myceliam.io
+spec:
+  group: myceliam.io
+  scope: Namespaced
+  names:
+    plural: gcpaccessprofiles
+    singular: gcpaccessprofile
+    kind: GcpAccessProfile
+    listKind: GcpAccessProfileList
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            projects:
+              description: >-
+                Map of GCP project ID to the list of GCP service account
+                *emails* in that project. Any ServiceAccount that opts into
+                this profile (via myceliam.io/gcp-access-profile) gets
+                impersonation access granted on every email listed for every
+                project here — there is no per-SA selection; create a
+                separate GcpAccessProfile for a ServiceAccount that needs a
+                different set of service accounts. myceliam never creates
+                these service accounts — provisioned out-of-band by the
+                project owner — it only grants/revokes
+                roles/iam.workloadIdentityUser on the named target SA.
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string
+                minItems: 1
+              minProperties: 1
+          required: ["projects"]
+      additionalPrinterColumns:
+        - name: Projects
+          type: string
+          jsonPath: .projects

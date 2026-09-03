@@ -1,0 +1,44 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: example-oidc-client-portobello-signedjwt
+  namespace: portobello
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: portobello-jwt
+      restartPolicy: Never
+      containers:
+        - name: example-oidc-client
+          image: example-oidc-client:test
+          imagePullPolicy: Never
+          env:
+            # Not secret — the client-id is just this ServiceAccount's own
+            # name (spec.ClientName). Unlike clienttype=secret, a signedjwt
+            # client's credentials secret carries only tls.crt/tls.key, no
+            # client_id/issuer keys — see reconcile.go's reconcileClient.
+            - name: KEYCLOAK_CLIENT_ID
+              value: "portobello-jwt"
+            # {MYCELIAM_KEYCLOAK_URL}/realms/{ClusterID}-{namespace} — same
+            # construction as IssuerURL, just not readable from a secret key
+            # here, so it's spelled out directly.
+            - name: KEYCLOAK_ISSUER
+              value: "https://keycloak.example.com/auth/realms/demo-portobello"
+            - name: KEYCLOAK_TLS_CERT_PATH
+              value: "/creds/tls.crt"
+            - name: KEYCLOAK_TLS_KEY_PATH
+              value: "/creds/tls.key"
+            # Same WLI provider as job-client-secret.yaml's gosa-secret — clienttype=secret
+            # and clienttype=signedjwt both fall under GCP's KindOIDC, one
+            # shared provider per namespace regardless of which SA is asking.
+            - name: GCP_STS_AUDIENCE
+              value: "//iam.googleapis.com/projects/<gcp-project-number>/locations/global/workloadIdentityPools/myceliam-operator/providers/demo-portobello-oidc"
+          volumeMounts:
+            - name: creds
+              mountPath: /creds
+              readOnly: true
+      volumes:
+        - name: creds
+          secret:
+            secretName: portobello-jwt-oidc-credentials

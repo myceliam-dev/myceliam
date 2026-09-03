@@ -1,0 +1,45 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-ns1
+---
+apiVersion: myceliam.io/v1
+kind: AwsAccessProfile
+metadata:
+  name: awsap-demo-ns1
+  namespace: demo-ns1
+accounts:
+  "<aws-account-id>":
+    - s3-role-a
+    - s3-role-b
+---
+apiVersion: myceliam.io/v1
+kind: GcpAccessProfile
+metadata:
+  name: gcpap-demo-ns1
+  namespace: demo-ns1
+projects:
+  "<your-gcp-project-id>":
+    - app-default@<your-gcp-project-id>.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: demo-ns1
+  name: gosa-secret
+  labels:
+    myceliam.io/autoidp: "true"
+    myceliam.io/client-type: "secret"
+    myceliam.io/aws-access-profile: "awsap-demo-ns1"
+    myceliam.io/gcp-access-profile: "gcpap-demo-ns1"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: demo-ns1
+  name: gosa-signedjwt
+  labels:
+    myceliam.io/autoidp: "true"
+    myceliam.io/client-type: "signedjwt"
+    myceliam.io/aws-access-profile: "awsap-demo-ns1"
+    myceliam.io/gcp-access-profile: "gcpap-demo-ns1"

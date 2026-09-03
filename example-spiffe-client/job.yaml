@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: example-spiffe-client
+  namespace: summer
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: example-spiffe-client
+        # Must match the ClusterSPIFFEID's podSelector for this workload to
+        # actually get a registration entry.
+        spiffe-workload: "true"
+    spec:
+      serviceAccountName: summer-spiffe-sa
+      restartPolicy: Never
+      # Same reasoning as jwt-test-app: give spire-controller-manager a
+      # moment to create this pod's registration entry (keyed by pod UID)
+      # before the main container's first fetch races ahead of it.
+      initContainers:
+        - name: wait-for-registration
+          image: busybox:1.37
+          command: ["sh", "-c", "sleep 10"]
+      containers:
+        - name: example-spiffe-client
+          image: example-spiffe-client:test
+          imagePullPolicy: Never
+          env:
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///spiffe-workload-api/spire-agent.sock"
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

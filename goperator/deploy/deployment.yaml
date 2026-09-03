@@ -1,0 +1,123 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: myceliam-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myceliam-operator
+  namespace: myceliam-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myceliam-operator
+  template:
+    metadata:
+      labels:
+        app: myceliam-operator
+    spec:
+      serviceAccountName: myceliam-operator
+      containers:
+        - name: operator
+          image: myceliam-operator:test
+          imagePullPolicy: IfNotPresent
+          env:
+            # Required, no default. Must be unique across every cluster that
+            # shares this Keycloak instance / AWS account / GCP project —
+            # it's folded into every realm and GCP WLI provider name this
+            # operator manages (and stamped as an ownership attribute on
+            # Keycloak realms/clients) so two clusters can never collide just
+            # because they happen to have a namespace with the same name.
+            - name: MYCELIAM_CLUSTER_ID
+              value: "CHANGE-ME-unique-per-cluster"
+            - name: MYCELIAM_KEYCLOAK_URL
+              value: "https://keycloak.example.com"
+            - name: MYCELIAM_KEYCLOAK_ADMIN_REALM
+              value: "master"
+            # Identifies the operator's one Keycloak client — used both for
+            # Admin REST API access and for the operator's own cloud-
+            # federation token. Not a secret, just an identifier — kept as
+            # plain config (rather than a key inside the Secrets below) so
+            # myceliam-keycloak-keypair can stay a pure kubernetes.io/tls
+            # secret, compatible with cert-manager or any other standard TLS
+            # rotation tooling.
+            - name: MYCELIAM_KEYCLOAK_CLIENT_ID
+              value: "myceliam-operator"
+            # The actual credential is never an env var: at startup the
+            # operator looks in its own namespace (MYCELIAM_SYSTEM_NAMESPACE,
+            # default myceliam-system) for exactly one of two Secrets, and
+            # uses whichever it finds (the keypair wins if both exist) —
+            # it never generates one for itself, unlike the keypairs it
+            # generates on behalf of clienttype=signedjwt workload apps.
+            #
+            # Option A — client secret (Opaque, key "client-secret"):
+            #   kubectl -n myceliam-system create secret generic myceliam-keycloak-secret \
+            #     --from-literal=client-secret=<redacted>
+            #
+            # Option B — signed-JWT keypair (kubernetes.io/tls, tls.crt/tls.key
+            # only — a standard `kubectl create secret tls` works directly):
+            # requires the admin to have already registered the JWKS derived
+            # from this same cert on the client's Credentials tab in the
+            # Keycloak console ("Signed Jwt" authenticator) — the operator can
+            # never register its own JWKS (that would require the session
+            # this credential bootstraps), so it must be pasted in before the
+            # operator ever starts:
+            #   kubectl -n myceliam-system create secret tls myceliam-keycloak-keypair \
+            #     --cert=operator.crt --key=operator.key
+            #
+            # Only relevant for Option B: how long each freshly minted client
+            # assertion JWT is valid for (exp - iat).
+            # - name: MYCELIAM_KEYCLOAK_ADMIN_SIGNEDJWT_ASSERTION_LIFETIME_SECONDS
+            #   value: "60"
+            #
+            # Only relevant for GCP IdP federation (myceliam.io/gcp-access-profile
+            # label). Not secrets — an STS audience string and a service
+            # account email are identifiers, not credentials, same as
+            # AwsOperatorRoleName/AwsOperatorSessionName above — so these are
+            # plain values, not secretKeyRefs.
+            - name: MYCELIAM_GCP_OPERATOR_STS_AUDIENCE
+              value: "//iam.googleapis.com/projects/<hub-project-number>/locations/global/workloadIdentityPools/<pool>/providers/<provider>"
+            - name: MYCELIAM_GCP_OPERATOR_SERVICE_ACCOUNT_EMAIL
+              value: "myceliam-operator@<hub-project>.iam.gserviceaccount.com"
+            # Uncomment this block if you'd rather the operator get its own
+            # bootstrap identity (for cloud federation only) from SPIRE
+            # instead of myceliam-keycloak-secret / myceliam-keycloak-keypair
+            # above. Requires the admin to have already registered a
+            # bootstrap AWS IdP / GCP WLI provider trusting your SPIRE
+            # deployment's issuer (same as the Keycloak-based bootstrap, just
+            # with a different issuer). Note this alone does NOT drop the
+            # myceliam-keycloak-secret/-keypair requirement — the operator
+            # still needs one of those for Admin REST API access as long as
+            # MYCELIAM_OIDC_PROVIDER=keycloak (the default); also set
+            # MYCELIAM_OIDC_PROVIDER=none below if this deployment only ever
+            # uses clienttype=spiffe ServiceAccounts and needs neither.
+            # - name: MYCELIAM_OPERATOR_IDENTITY_SOURCE
+            #   value: "spiffe"
+            # - name: MYCELIAM_OPERATOR_SPIFFE_AUDIENCE
+            #   value: "<audience the admin configured on the bootstrap IdP/WLI provider>"
+            # - name: SPIFFE_ENDPOINT_SOCKET
+            #   value: "unix:///spiffe-workload-api/spire-agent.sock"
+            # - name: MYCELIAM_OIDC_PROVIDER
+            #   value: "none"
+          # Also uncomment this volumeMounts/volumes pair together with the env vars
+          # above — the operator's own pod needs the same spiffe-csi-driver mount any
+          # clienttype=spiffe ServiceAccount gets, to reach the local SPIRE agent's
+          # Workload API (via go-spiffe/v2's native gRPC client — no spire-agent binary
+          # bundled in this image, unlike pythonoperator's).
+          #   volumeMounts:
+          #     - name: spiffe-workload-api
+          #       mountPath: /spiffe-workload-api
+          #       readOnly: true
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+      # volumes:
+      #   - name: spiffe-workload-api
+      #     csi:
+      #       driver: csi.spiffe.io
+      #       readOnly: true

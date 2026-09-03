@@ -1,0 +1,22 @@
+# Claude Code's own local session config — not part of this project.
+.claude/
+
+# Docker image tarballs built for manual transfer to remote clusters
+# (example-*-client/*.tar.gz) — regenerate with docker build/save, never commit.
+*.tar.gz
+
+# Private key material that might get generated locally while following the
+# README (e.g. operator/app signed-JWT bootstrap certs) — never intended to
+# be committed.
+*.pem
+*.key
+
+# Stray compiled binaries from `go build ./...` — for a package-main
+# directory named the same as its module (both example-*-client dirs), Go
+# writes the output binary right into the source directory with no
+# extension to distinguish it from source.
+/example-oidc-client/example-oidc-client
+/example-spiffe-client/example-spiffe-client
+
+# OS cruft
+.DS_Store

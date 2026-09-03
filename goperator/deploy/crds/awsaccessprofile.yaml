@@ -1,0 +1,43 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: awsaccessprofiles.myceliam.io
+spec:
+  group: myceliam.io
+  scope: Namespaced
+  names:
+    plural: awsaccessprofiles
+    singular: awsaccessprofile
+    kind: AwsAccessProfile
+    listKind: AwsAccessProfileList
+  versions:
+    - name: v1
+      served: true
+      storage: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            accounts:
+              description: >-
+                Map of AWS account ID to the list of IAM role *names* in that
+                account. Any ServiceAccount that opts into this profile (via
+                myceliam.io/aws-access-profile) gets trust-policy access added
+                on every role listed for every account here — there is no
+                per-SA role selection; create a separate AwsAccessProfile for
+                a ServiceAccount that needs a different set of roles.
+                myceliam never creates these roles — provisioned out-of-band
+                by the account owner — it only manages each named role's
+                trust policy.
+              type: object
+              additionalProperties:
+                type: array
+                items:
+                  type: string
+                minItems: 1
+              minProperties: 1
+          required: ["accounts"]
+      additionalPrinterColumns:
+        - name: Accounts
+          type: string
+          jsonPath: .accounts

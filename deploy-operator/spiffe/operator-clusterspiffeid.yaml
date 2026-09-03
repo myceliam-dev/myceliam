@@ -1,0 +1,13 @@
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: myceliam-operator
+spec:
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: myceliam-system
+  podSelector:
+    matchLabels:
+      app: myceliam-operator
+  spiffeIDTemplate: spiffe://spire.example.com/ns/{{ .PodMeta.Namespace }}/sa/{{
+    .PodSpec.ServiceAccountName }}

@@ -1,0 +1,78 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myceliam-operator
+  namespace: myceliam-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: myceliam-operator
+  template:
+    metadata:
+      labels:
+        app: myceliam-operator
+    spec:
+      serviceAccountName: myceliam-operator
+      containers:
+        - name: operator
+          image: myceliam-operator:test
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MYCELIAM_CLUSTER_ID
+              value: <>
+            # Still required: MYCELIAM_OIDC_PROVIDER defaults to "keycloak",
+            # so the operator still needs Keycloak for the Admin REST API
+            # (provisioning any clienttype=secret/signedjwt workload
+            # ServiceAccounts) — apply oidc-client-secret.yaml or
+            # oidc-tls-secret.yaml from ../oidc/ for this same client
+            # regardless. Only the operator's OWN AWS/GCP federation token
+            # (below) comes from SPIRE instead.
+            - name: MYCELIAM_KEYCLOAK_URL
+              value: <>
+            - name: MYCELIAM_KEYCLOAK_ADMIN_REALM
+              value: "master"
+            - name: MYCELIAM_KEYCLOAK_CLIENT_ID
+              value: "myceliam-operator-tls"
+            - name: MYCELIAM_KEYCLOAK_OPERATOR_SCOPE
+              value: <>
+            # Independent of MYCELIAM_OIDC_PROVIDER above — this only picks
+            # where the operator's OWN cloud-federation token comes from.
+            # Requires a SPIRE registration entry for the operator's own pod
+            # (see operator-clusterspiffeid.yaml) and a separate, pre-existing
+            # AWS/GCP bootstrap trust for this specific SPIFFE identity —
+            # distinct from whatever trust already exists for individual
+            # namespace/SA federation, and from the Keycloak-based bootstrap
+            # trust oidc-operator.yaml would use instead.
+            - name: MYCELIAM_OPERATOR_IDENTITY_SOURCE
+              value: "spiffe"
+            - name: MYCELIAM_OPERATOR_SPIFFE_AUDIENCE
+              value: <>
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///spiffe-workload-api/spire-agent.sock"
+            - name: MYCELIAM_GCP_OPERATOR_STS_AUDIENCE
+              value: "//iam.googleapis.com/projects/<>/locations/global/workloadIdentityPools/<>/providers/<>"
+            - name: MYCELIAM_GCP_OPERATOR_SERVICE_ACCOUNT_EMAIL
+              value: <>
+            # Distinct from the default "myceliam-operator" role name the
+            # Keycloak-bootstrapped identity uses — the SPIRE-issued identity
+            # needs its own AWS role (with its own trust policy dedicated to
+            # this SPIFFE identity, not shared with the Keycloak one).
+            - name: MYCELIAM_AWS_OPERATOR_ROLE_NAME
+              value: <>
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true

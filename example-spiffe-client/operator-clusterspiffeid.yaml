@@ -1,0 +1,19 @@
+# Registers the myceliam-operator's own pod for a SPIFFE identity — needed
+# only when MYCELIAM_OPERATOR_IDENTITY_SOURCE=spiffe. Without this, SPIRE has
+# no registration entry whose selectors match the operator's pod, so its own
+# FetchJWTSVID call fails with "PermissionDenied: no identity issued" (unlike
+# workload ServiceAccounts, the operator's own identity isn't something
+# myceliam provisions for itself — same chicken-and-egg reasoning as its
+# signed-JWT admin credential).
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: myceliam-operator
+spec:
+  spiffeIDTemplate: "spiffe://spire.example.com/ns/{{ .PodMeta.Namespace }}/sa/{{ .PodSpec.ServiceAccountName }}"
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: myceliam-system
+  podSelector:
+    matchLabels:
+      app: myceliam-operator

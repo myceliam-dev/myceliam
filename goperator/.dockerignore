@@ -1,0 +1,12 @@
+# Git
+.git/
+.gitignore
+
+# Local tool config
+.claude/
+
+# OS noise
+.DS_Store
+
+# Not needed inside the build context
+deploy/

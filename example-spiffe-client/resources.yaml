@@ -1,0 +1,42 @@
+apiVersion: myceliam.io/v1
+kind: AutoidpAllowlist
+metadata:
+  name: default
+  namespace: myceliam-system
+namespaces:
+  - summer
+---
+apiVersion: myceliam.io/v1
+kind: AwsAccessProfile
+metadata:
+  name: awsap-summer
+  namespace: summer
+accounts:
+  "<aws-account-id>":
+    - s3-role-a
+    - s3-role-b
+---
+apiVersion: myceliam.io/v1
+kind: GcpAccessProfile
+metadata:
+  name: gcpap-summer
+  namespace: summer
+projects:
+  "<your-gcp-project-id>":
+    - app-default@<your-gcp-project-id>.iam.gserviceaccount.com
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: summer
+  name: summer-spiffe-sa
+  labels:
+    myceliam.io/autoidp: "true"
+    myceliam.io/client-type: "spiffe"
+    myceliam.io/aws-access-profile: "awsap-summer"
+    myceliam.io/gcp-access-profile: "gcpap-summer"
+  annotations:
+    myceliam.io/spiffe-jwt-issuer: "https://spire.example.com"
+    # Must exactly match what the ClusterSPIFFEID template actually issues
+    # for this pod: spiffe://<trust-domain>/ns/{namespace}/sa/{serviceAccountName}
+    myceliam.io/spiffe-id: "spiffe://spire.example.com/ns/summer/sa/summer-spiffe-sa"
