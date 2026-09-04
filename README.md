@@ -8,6 +8,8 @@ environments such as AWS and GCP, and declaratively keeps that trust in
 sync. See [`goperator/README.md`](goperator/README.md) for the full
 documentation — architecture, configuration reference, and deployment guide.
 
+[![Watch the demo video](https://img.youtube.com/vi/FAIoXn2n9iE/hqdefault.jpg)](https://youtu.be/FAIoXn2n9iE)
+
 ## Repository layout
 
 - [`goperator/`](goperator/) — the operator itself.
