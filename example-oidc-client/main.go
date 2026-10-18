@@ -26,16 +26,30 @@ import (
 )
 
 const (
-	awsAccountID = "<aws-account-id>"
-	awsRolesCSV  = "s3-role-a,s3-role-b" // every role listed for this account in awsap-demo-ns1
+	awsAccountID = "344256006574"
+	awsRolesCSV  = "roleA,roleB" // every role listed for this account in awsap-demo-ns1
 	awsRegion    = "us-east-1"
 
-	gcpTargetSAEmail = "app-default@<your-gcp-project-id>.iam.gserviceaccount.com"
-	gcpProjectID     = "<your-gcp-project-id>"
+	gcpTargetSAEmail = "app-default@project-2f046078-45a1-49af-ac9.iam.gserviceaccount.com"
+	gcpProjectID     = "project-2f046078-45a1-49af-ac9"
 )
 
 func main() {
 	ctx := context.Background()
+
+	// AUTH0_DOMAIN present selects the Auth0 path entirely. This is just this
+	// example client's own way of choosing which demo to run — the operator
+	// itself can have both Keycloak and Auth0 active at once (see
+	// goperator/README.md's "How it works"), so this switch isn't a
+	// reflection of any per-deployment operator constraint.
+	if domain := os.Getenv("AUTH0_DOMAIN"); domain != "" {
+		runAuth0(ctx, domain)
+		return
+	}
+	runKeycloak(ctx)
+}
+
+func runKeycloak(ctx context.Context) {
 	clientID := mustEnv("KEYCLOAK_CLIENT_ID")
 	// Read from the same myceliam-managed credentials secret this
 	// ServiceAccount already has, rather than hardcoding a realm name here —
@@ -80,6 +94,63 @@ func main() {
 
 	fmt.Println("\n=== GCP Cloud Storage buckets ===")
 	if err := listGCPBuckets(ctx, jwt, gcpSTSAudience); err != nil {
+		log.Printf("gcp: %v", err)
+	}
+}
+
+// runAuth0 mirrors example-spiffe-client's fetch-twice-per-cloud pattern,
+// not runKeycloak's one-combined-scope request: Auth0's Resource Server
+// model issues a token against exactly one audience per request (no
+// Keycloak-style "space-separated scope list" trick), and the aud claim it
+// stamps is single-valued per call regardless. AWS_AUTH0_AUDIENCE/
+// GCP_AUTH0_AUDIENCE are the two Resource Server identifiers myceliam
+// created for this namespace — cloudmodels.ParseCloudFederationSpecs's
+// "<cloud>-<cluster-id>-<namespace>" convention, shared by every SA in the
+// namespace (see cloudmodels.usesSharedAudience), unlike Keycloak's
+// per-SA scope names.
+func runAuth0(ctx context.Context, domain string) {
+	clientID := mustEnv("AUTH0_CLIENT_ID")
+
+	// Auto-detects like runKeycloak does: a client secret if present,
+	// otherwise a mounted signedjwt keypair plus its Auth0-assigned kid.
+	fetchToken := func(audience string) (string, error) {
+		if clientSecret := os.Getenv("AUTH0_CLIENT_SECRET"); clientSecret != "" {
+			return getAuth0TokenSecret(ctx, domain, clientID, clientSecret, audience)
+		}
+		certPath := mustEnv("AUTH0_TLS_CERT_PATH")
+		keyPath := mustEnv("AUTH0_TLS_KEY_PATH")
+		kid := mustEnv("AUTH0_KID")
+		return getAuth0TokenSignedJWT(ctx, domain, clientID, kid, certPath, keyPath, audience)
+	}
+
+	// AWS_AUTH0_AUDIENCE is optional so this binary can run a GCP-only test
+	// (e.g. while AWS's own Auth0 IdP federation is separately under
+	// investigation) without requiring an unused AWS Resource Server/role.
+	if awsAudience := os.Getenv("AWS_AUTH0_AUDIENCE"); awsAudience != "" {
+		fmt.Println("\n=== AWS S3 buckets ===")
+		awsJWT, err := fetchToken(awsAudience)
+		if err != nil {
+			log.Fatalf("obtaining Auth0 token for audience %s: %v", awsAudience, err)
+		}
+		log.Println("aws access token:", awsJWT)
+		for _, roleName := range strings.Split(awsRolesCSV, ",") {
+			if err := listAWSBuckets(ctx, awsJWT, roleName); err != nil {
+				log.Printf("role %s: %v", roleName, err)
+			}
+		}
+	} else {
+		log.Println("AWS_AUTH0_AUDIENCE not set, skipping AWS")
+	}
+
+	gcpAudience := mustEnv("GCP_AUTH0_AUDIENCE")
+	gcpSTSAudience := mustEnv("GCP_STS_AUDIENCE")
+	fmt.Println("\n=== GCP Cloud Storage buckets ===")
+	gcpJWT, err := fetchToken(gcpAudience)
+	if err != nil {
+		log.Fatalf("obtaining Auth0 token for audience %s: %v", gcpAudience, err)
+	}
+	log.Println("gcp access token:", gcpJWT)
+	if err := listGCPBuckets(ctx, gcpJWT, gcpSTSAudience); err != nil {
 		log.Printf("gcp: %v", err)
 	}
 }

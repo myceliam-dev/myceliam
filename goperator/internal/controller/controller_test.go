@@ -18,6 +18,7 @@ import (
 	"myceliam/internal/cloudmodels"
 	"myceliam/internal/config"
 	"myceliam/internal/models"
+	"myceliam/internal/oidc"
 )
 
 func newTestClient(t *testing.T, objs ...client.Object) client.Client {
@@ -74,8 +75,8 @@ func (f *fakeOIDCProvider) DeleteTenant(ctx context.Context, tenantID string) er
 func (f *fakeOIDCProvider) EnsureSecretClient(ctx context.Context, spec *models.ClientSpec) (string, string, error) {
 	return f.secretClientID, f.secretClientSecret, nil
 }
-func (f *fakeOIDCProvider) EnsureSignedjwtClient(ctx context.Context, spec *models.ClientSpec, jwksString string) (string, error) {
-	return f.signedjwtClientID, nil
+func (f *fakeOIDCProvider) EnsureSignedjwtClient(ctx context.Context, spec *models.ClientSpec, certPEM []byte, jwksString, kid string) (string, string, error) {
+	return f.signedjwtClientID, kid, nil
 }
 func (f *fakeOIDCProvider) DeleteClient(ctx context.Context, tenantID, clientName string) error {
 	f.deleteClientCalls = append(f.deleteClientCalls, tenantID+"/"+clientName)
@@ -85,11 +86,11 @@ func (f *fakeOIDCProvider) IssuerURL(tenantID string) (string, error) {
 	f.issuerURLCalls = append(f.issuerURLCalls, tenantID)
 	return f.issuer, nil
 }
-func (f *fakeOIDCProvider) EnsureAccessScope(ctx context.Context, tenantID, clientName, scopeName, audience string) error {
+func (f *fakeOIDCProvider) EnsureAccessScope(ctx context.Context, tenantID, clientName, scopeName, audience string) (string, error) {
 	f.ensureScopeCalls++
-	return nil
+	return clientName, nil
 }
-func (f *fakeOIDCProvider) DeleteAccessScope(ctx context.Context, tenantID, scopeName string) error {
+func (f *fakeOIDCProvider) DeleteAccessScope(ctx context.Context, tenantID, clientName, scopeName string) error {
 	f.deleteScopeCalls++
 	return nil
 }
@@ -108,7 +109,7 @@ func TestServiceAccountReconciler_AddsFinalizerFirst(t *testing.T) {
 	}
 	c := newTestClient(t, sa)
 	fp := &fakeOIDCProvider{secretClientID: "my-app", secretClientSecret: "s3cr3t", issuer: "https://kc.example.com/realms/demo"}
-	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDC: fp}}
+	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDCProviders: map[string]oidc.Provider{"keycloak": fp}, OperatorOIDC: fp}}
 
 	if _, err := r.Reconcile(context.Background(), reconcileRequest("demo", "my-app")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -136,7 +137,7 @@ func TestServiceAccountReconciler_ReconcilesSecretClientAndWritesState(t *testin
 	}
 	c := newTestClient(t, sa)
 	fp := &fakeOIDCProvider{secretClientID: "my-app", secretClientSecret: "s3cr3t", issuer: "https://kc.example.com/realms/demo"}
-	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDC: fp}}
+	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDCProviders: map[string]oidc.Provider{"keycloak": fp}, OperatorOIDC: fp}}
 
 	result, err := r.Reconcile(context.Background(), reconcileRequest("demo", "my-app"))
 	if err != nil {
@@ -150,11 +151,14 @@ func TestServiceAccountReconciler_ReconcilesSecretClientAndWritesState(t *testin
 	}
 
 	var secret corev1.Secret
-	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "demo", Name: "my-app-oidc-credentials"}, &secret); err != nil {
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "demo", Name: "my-app-secret-keycloak-credentials"}, &secret); err != nil {
 		t.Fatalf("expected credentials secret to be written: %v", err)
 	}
 	if string(secret.Data["client_secret"]) != "s3cr3t" {
 		t.Fatalf("unexpected secret data: %+v", secret.Data)
+	}
+	if secret.Annotations["myceliam.io/service-account"] != "my-app" {
+		t.Fatalf("expected service-account annotation, got %+v", secret.Annotations)
 	}
 
 	var sa2 corev1.ServiceAccount
@@ -163,6 +167,78 @@ func TestServiceAccountReconciler_ReconcilesSecretClientAndWritesState(t *testin
 	}
 	if _, ok := sa2.Annotations[lastReconciledAnnotation]; !ok {
 		t.Fatalf("expected last-reconciled-state annotation to be written")
+	}
+}
+
+func TestServiceAccountReconciler_RoutesToLabeledProviderAmongMultipleActive(t *testing.T) {
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "demo", Name: "my-app",
+			Labels: map[string]string{
+				models.AutoidpLabel:      "true",
+				models.ClientTypeLabel:   "secret",
+				models.OidcProviderLabel: "auth0",
+			},
+			Finalizers: []string{finalizerName},
+		},
+	}
+	c := newTestClient(t, sa)
+	kcFake := &fakeOIDCProvider{secretClientID: "wrong-provider", secretClientSecret: "wrong-secret"}
+	auth0Fake := &fakeOIDCProvider{secretClientID: "my-app", secretClientSecret: "right-secret", issuer: "https://tenant.us.auth0.com/"}
+	r := &ServiceAccountReconciler{Deps: &Deps{
+		Client:        c,
+		Settings:      testSettings(t),
+		OIDCProviders: map[string]oidc.Provider{"keycloak": kcFake, "auth0": auth0Fake},
+		OperatorOIDC:  kcFake,
+	}}
+
+	if _, err := r.Reconcile(context.Background(), reconcileRequest("demo", "my-app")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(kcFake.ensureTenantCalls) != 0 {
+		t.Fatalf("expected the keycloak fake never called, got %v", kcFake.ensureTenantCalls)
+	}
+	if len(auth0Fake.ensureTenantCalls) != 1 {
+		t.Fatalf("expected the auth0 fake called once, got %v", auth0Fake.ensureTenantCalls)
+	}
+
+	var secret corev1.Secret
+	if err := c.Get(context.Background(), client.ObjectKey{Namespace: "demo", Name: "my-app-secret-auth0-credentials"}, &secret); err != nil {
+		t.Fatalf("expected auth0-named credentials secret to be written: %v", err)
+	}
+	if string(secret.Data["client_secret"]) != "right-secret" {
+		t.Fatalf("expected the auth0 fake's own secret material, got %+v", secret.Data)
+	}
+}
+
+func TestServiceAccountReconciler_MultipleActiveProvidersRequireLabel(t *testing.T) {
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "demo", Name: "my-app",
+			Labels:     map[string]string{models.AutoidpLabel: "true", models.ClientTypeLabel: "secret"},
+			Finalizers: []string{finalizerName},
+		},
+	}
+	c := newTestClient(t, sa)
+	kcFake := &fakeOIDCProvider{}
+	auth0Fake := &fakeOIDCProvider{}
+	r := &ServiceAccountReconciler{Deps: &Deps{
+		Client:        c,
+		Settings:      testSettings(t),
+		OIDCProviders: map[string]oidc.Provider{"keycloak": kcFake, "auth0": auth0Fake},
+		OperatorOIDC:  kcFake,
+	}}
+
+	// A *operr.Permanent is swallowed into a periodic-requeue, nil-error
+	// result by classify (see result.go) — the actual assertion is that
+	// neither provider was ever called, not that Reconcile returns an error.
+	if _, err := r.Reconcile(context.Background(), reconcileRequest("demo", "my-app")); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(kcFake.ensureTenantCalls) != 0 || len(auth0Fake.ensureTenantCalls) != 0 {
+		t.Fatalf("expected neither provider called without an oidc-provider label, got keycloak=%v auth0=%v",
+			kcFake.ensureTenantCalls, auth0Fake.ensureTenantCalls)
 	}
 }
 
@@ -175,7 +251,7 @@ func TestServiceAccountReconciler_SpiffeReconcileRequiresIssuerAnnotation(t *tes
 		},
 	}
 	c := newTestClient(t, sa)
-	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDC: nil}}
+	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t)}}
 
 	// Missing SpiffeJWTIssuerAnnotation is a *operr.Permanent — classify
 	// turns that into a nil-error, periodically-requeued result rather than
@@ -201,7 +277,7 @@ func TestServiceAccountReconciler_CleanupOnDelete(t *testing.T) {
 	}
 	c := newTestClient(t, sa)
 	fp := &fakeOIDCProvider{}
-	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDC: fp}}
+	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDCProviders: map[string]oidc.Provider{"keycloak": fp}, OperatorOIDC: fp}}
 
 	if _, err := r.Reconcile(context.Background(), reconcileRequest("demo", "my-app")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -226,7 +302,7 @@ func TestAwsAccessProfileReconciler_FinalizerAndCleanup(t *testing.T) {
 		Accounts: map[string][]string{},
 	}
 	c := newTestClient(t, profile)
-	r := &AwsAccessProfileReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDC: nil}}
+	r := &AwsAccessProfileReconciler{Deps: &Deps{Client: c, Settings: testSettings(t)}}
 
 	if _, err := r.Reconcile(context.Background(), reconcileRequest("demo", "ap1")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -286,7 +362,7 @@ func TestRefreshServiceAccountsForProfile_ExcludesSpiffeSAs(t *testing.T) {
 	}
 	c := newTestClient(t, profile, secretSA, spiffeSA)
 	fp := &fakeOIDCProvider{issuer: "https://kc.example.com/realms/demo-ns1"}
-	deps := &Deps{Client: c, Settings: testSettings(t), OIDC: fp}
+	deps := &Deps{Client: c, Settings: testSettings(t), OIDCProviders: map[string]oidc.Provider{"keycloak": fp}, OperatorOIDC: fp}
 
 	err := refreshServiceAccountsForProfile(context.Background(), deps, "demo-ns1", cloudmodels.AwsProfileLabel, "awsap-demo-ns1")
 	if err != nil {
@@ -323,7 +399,7 @@ func TestGcpAccessProfileReconciler_FinalizerAndCleanup(t *testing.T) {
 		Projects: map[string][]string{},
 	}
 	c := newTestClient(t, profile)
-	r := &GcpAccessProfileReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDC: nil}}
+	r := &GcpAccessProfileReconciler{Deps: &Deps{Client: c, Settings: testSettings(t)}}
 
 	if _, err := r.Reconcile(context.Background(), reconcileRequest("demo", "gp1")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -359,15 +435,19 @@ func TestSecretReconciler_RotatesSignedjwtCert(t *testing.T) {
 		},
 	}
 	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "demo", Name: "my-app-oidc-credentials"},
-		Type:       corev1.SecretTypeTLS,
-		Data:       map[string][]byte{"tls.crt": generateTestCertPEM(t)},
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace:   "demo",
+			Name:        "my-app-jwt-keycloak-credentials",
+			Annotations: map[string]string{"myceliam.io/service-account": "my-app"},
+		},
+		Type: corev1.SecretTypeTLS,
+		Data: map[string][]byte{"tls.crt": generateTestCertPEM(t)},
 	}
 	c := newTestClient(t, sa, secret)
 	fp := &fakeOIDCProvider{signedjwtClientID: "my-app"}
-	r := &SecretReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDC: fp}}
+	r := &SecretReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDCProviders: map[string]oidc.Provider{"keycloak": fp}, OperatorOIDC: fp}}
 
-	if _, err := r.Reconcile(context.Background(), reconcileRequest("demo", "my-app-oidc-credentials")); err != nil {
+	if _, err := r.Reconcile(context.Background(), reconcileRequest("demo", "my-app-jwt-keycloak-credentials")); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(fp.ensureTenantCalls) != 1 {

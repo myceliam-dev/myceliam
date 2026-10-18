@@ -17,15 +17,15 @@ documentation — architecture, configuration reference, and deployment guide.
   of operator deployment manifests, split by identity source; see its own
   README for how it relates to `goperator/deploy/`.
 - [`example-oidc-client/`](example-oidc-client/) — a standalone example app
-  proving Keycloak-issued federation works end to end, listing real S3/GCS
-  buckets with credentials obtained purely through federation.
+  proving Keycloak- or Auth0-issued federation works end to end, listing real
+  S3/GCS buckets with credentials obtained purely through federation.
 - [`example-spiffe-client/`](example-spiffe-client/) — the same proof, for a
   SPIRE-issued identity.
 
 ## Status
 
-Early-stage — exercised end-to-end against real Keycloak, SPIRE, AWS, and
-GCP, but not yet hardened for production use. See
+Early-stage — exercised end-to-end against real Keycloak, Auth0, SPIRE, AWS,
+and GCP, but not yet hardened for production use. See
 [`goperator/README.md`'s "Known limitations"](goperator/README.md#known-limitations)
 before relying on it.
 

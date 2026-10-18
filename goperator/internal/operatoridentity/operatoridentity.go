@@ -2,7 +2,7 @@
 // the operator's own credential-exchange path, distinct from the
 // per-ServiceAccount client provisioning oidc.Provider handles. Obtains a
 // token for the operator's own pre-provisioned identity (Keycloak- or
-// SPIFFE-issued, per Settings.OperatorIdentitySource) and exchanges it for
+// SPIFFE-issued, per Settings.OperatorProvider) and exchanges it for
 // short-lived AWS/GCP credentials via AssumeRoleWithWebIdentity / GCP STS.
 package operatoridentity
 
@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/spiffe/go-spiffe/v2/svid/jwtsvid"
 	"github.com/spiffe/go-spiffe/v2/workloadapi"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	cloudaws "myceliam/internal/cloudproviders/aws"
 	"myceliam/internal/config"
@@ -52,7 +53,7 @@ var fetchSpiffeJWTSVID = func(ctx context.Context, audience, addr string) (strin
 
 // getOperatorSpiffeToken fetches the operator's own JWT-SVID from its local
 // SPIRE agent's Workload API — used instead of a Keycloak master-realm token
-// when OperatorIdentitySource is "spiffe". The operator's own pod needs the
+// when OperatorProvider is "spiffe". The operator's own pod needs the
 // same spiffe-csi-driver volume mount (and SPIFFE_ENDPOINT_SOCKET env var)
 // any clienttype=spiffe ServiceAccount gets.
 //
@@ -65,7 +66,7 @@ func getOperatorSpiffeToken(ctx context.Context, settings *config.Settings) (str
 	if settings.OperatorSpiffeAudience == "" {
 		return "", operr.Permanentf(
 			"MYCELIAM_OPERATOR_SPIFFE_AUDIENCE must be set when " +
-				"MYCELIAM_OPERATOR_IDENTITY_SOURCE=spiffe — it must match whatever audience " +
+				"MYCELIAM_OPERATOR_PROVIDER=spiffe — it must match whatever audience " +
 				"the admin configured on the bootstrap AWS IdP's ClientIDList / GCP WLI " +
 				"provider's allowedAudiences.",
 		)
@@ -75,7 +76,7 @@ func getOperatorSpiffeToken(ctx context.Context, settings *config.Settings) (str
 	if !ok || endpoint == "" {
 		return "", operr.Permanentf(
 			"SPIFFE_ENDPOINT_SOCKET must be set (as a unix:///path URI) when " +
-				"MYCELIAM_OPERATOR_IDENTITY_SOURCE=spiffe, so the operator can reach its " +
+				"MYCELIAM_OPERATOR_PROVIDER=spiffe, so the operator can reach its " +
 				"local SPIRE agent's Workload API.",
 		)
 	}
@@ -89,29 +90,48 @@ func getOperatorSpiffeToken(ctx context.Context, settings *config.Settings) (str
 
 // getOperatorToken obtains an access token for the operator's own
 // pre-provisioned identity, to be exchanged for cloud credentials via
-// AWS/GCP STS. Dispatches on Settings.OperatorIdentitySource: "spiffe"
-// fetches the operator's own JWT-SVID directly; anything else (default
-// "keycloak") delegates to whichever oidc.Provider is configured (the same
-// long-lived instance built once at startup and threaded through Deps.OIDC —
-// reusing it, rather than building a fresh one per call, is what lets
-// KeycloakProvider's token caching actually do anything) rather than
-// hardcoding Keycloak.
+// AWS/GCP STS. Dispatches on Settings.OperatorProvider: "spiffe" fetches the
+// operator's own JWT-SVID directly; anything else delegates to provider,
+// which callers always pass as Deps.OperatorOIDC — the single instance
+// config.Settings.OperatorProvider names, resolved once at startup (see
+// cmd/main.go) from the same provider registry oidc.GetProviders builds for
+// workload provisioning, reusing whichever admin credential that provider
+// already reads (the same "one client serves both roles" pattern Keycloak's
+// KeycloakClientID has always used). Reusing that one long-lived instance,
+// rather than building a fresh one per call, is what lets KeycloakProvider's
+// token caching actually do anything.
 func getOperatorToken(ctx context.Context, settings *config.Settings, provider oidc.Provider) (string, error) {
-	if settings.OperatorIdentitySource == "spiffe" {
+	token, err := fetchOperatorToken(ctx, settings, provider)
+	if err != nil {
+		return "", err
+	}
+	// DIAGNOSTIC ONLY — logs the raw bearer JWT so it can be pasted into
+	// jwt.io while comparing what each MYCELIAM_OPERATOR_PROVIDER value
+	// actually issues (azp/sub/aud shape differs per provider — see
+	// cloudmodels.OidcSubjectClaim). This is a live, unexpired credential
+	// for the duration of its exp: anyone with `kubectl logs` access to this
+	// pod can replay it against AWS/GCP until then. Remove this Info log (or
+	// gate it behind a debug-only flag) before running this in anything
+	// other than a throwaway/dev cluster.
+	log.FromContext(ctx).Info("operator token obtained", "provider", settings.OperatorProvider, "jwt", token)
+	return token, nil
+}
+
+func fetchOperatorToken(ctx context.Context, settings *config.Settings, provider oidc.Provider) (string, error) {
+	if settings.OperatorProvider == "spiffe" {
 		return getOperatorSpiffeToken(ctx, settings)
 	}
 	if provider == nil {
-		// MYCELIAM_OIDC_PROVIDER=none with OperatorIdentitySource left at its
-		// "keycloak" default: a deployment that opted out of the
-		// per-ServiceAccount OIDC provider but never redirected its own
-		// operator identity to spiffe either. pythonoperator has no
-		// equivalent guard here (its get_provider(...).get_operator_token()
-		// would raise a bare AttributeError on None) — this surfaces the
-		// same misconfiguration as a clear PermanentError instead of a panic.
+		// Shouldn't happen: config.Settings.validateProviderConfig already
+		// guarantees OperatorProvider is either "spiffe" or the name of a
+		// provider that was successfully built into the registry Deps.OperatorOIDC
+		// was resolved from. Surfacing this as a clear PermanentError instead
+		// of a panic if that invariant is ever violated (e.g. a future
+		// refactor bypassing validateProviderConfig).
 		return "", operr.Permanentf(
-			"MYCELIAM_OPERATOR_IDENTITY_SOURCE=keycloak requires MYCELIAM_OIDC_PROVIDER to be " +
-				"set to a real provider (not 'none') — set MYCELIAM_OPERATOR_IDENTITY_SOURCE=spiffe " +
-				"instead if this deployment has no Keycloak/Okta/Auth0 provider configured.",
+			"internal error: MYCELIAM_OPERATOR_PROVIDER=%q but no matching OIDC provider "+
+				"instance was resolved for the operator's own identity",
+			settings.OperatorProvider,
 		)
 	}
 	return provider.GetOperatorToken(ctx)
@@ -139,7 +159,7 @@ var newSTSClient = func() stsAPI {
 }
 
 // GetAWSCredentials exchanges the operator's own token (Keycloak- or
-// SPIFFE-issued, per Settings.OperatorIdentitySource) for short-lived AWS
+// SPIFFE-issued, per Settings.OperatorProvider) for short-lived AWS
 // credentials via AssumeRoleWithWebIdentity, targeting the pre-provisioned
 // per-account operator role.
 func GetAWSCredentials(ctx context.Context, settings *config.Settings, accountID string, provider oidc.Provider) (cloudaws.Credentials, error) {
@@ -193,7 +213,7 @@ func postJSON(ctx context.Context, client *http.Client, url string, headers map[
 }
 
 // GetGCPAccessToken exchanges the operator's own token (Keycloak- or
-// SPIFFE-issued, per Settings.OperatorIdentitySource) for a GCP access token:
+// SPIFFE-issued, per Settings.OperatorProvider) for a GCP access token:
 // first via GCP STS token exchange (against the pre-provisioned bootstrap
 // Workload Identity Pool), then impersonating the pre-provisioned hub service
 // account for the final access token. That service account must already have

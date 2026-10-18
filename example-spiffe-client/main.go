@@ -28,15 +28,15 @@ import (
 )
 
 const (
-	awsAccountID = "<aws-account-id>"
-	awsRolesCSV  = "s3-role-a,s3-role-b" // every role listed for this account in the summer namespace's AwsAccessProfile
+	awsAccountID = "344256006574"
+	awsRolesCSV  = "roleA,roleB" // every role listed for this account in the summer namespace's AwsAccessProfile
 	awsRegion    = "us-east-1"
 
 	// awsAudience/gcpAudience must match what myceliam actually configured
 	// on the AWS role trust condition / GCP WLI provider's allowedAudiences
 	// for this namespace — see cloudmodels.ParseCloudFederationSpecs's own
 	// doc comment for the <cloud>-<namespace>[-<sa>] convention.
-	awsAudience = "aws-morel-morel-spiffe-sa"
+	awsAudience = "aws-morel-morel-sa"
 	gcpAudience = "gcp-morel"
 
 	// gcpSTSAudience names the WLI provider gcpap-summer (well, whatever the
@@ -45,9 +45,9 @@ const (
 	// //iam.googleapis.com/projects/{number}/locations/global/workloadIdentityPools/{pool}/providers/{provider}
 	// Update the provider ID segment if MYCELIAM_CLUSTER_ID on this cluster
 	// ever changes.
-	gcpSTSAudience   = "//iam.googleapis.com/projects/<gcp-project-number>/locations/global/workloadIdentityPools/myceliam-operator/providers/demo-morel-spiffe"
-	gcpTargetSAEmail = "app-default@<your-gcp-project-id>.iam.gserviceaccount.com"
-	gcpProjectID     = "<your-gcp-project-id>"
+	gcpSTSAudience   = "//iam.googleapis.com/projects/315798566630/locations/global/workloadIdentityPools/myceliam-operator/providers/demo-morel-spiffe"
+	gcpTargetSAEmail = "app-default@project-2f046078-45a1-49af-ac9.iam.gserviceaccount.com"
+	gcpProjectID     = "project-2f046078-45a1-49af-ac9"
 )
 
 func main() {

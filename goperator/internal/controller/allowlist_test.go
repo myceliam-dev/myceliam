@@ -10,6 +10,7 @@ import (
 
 	myceliamv1 "myceliam/api/v1"
 	"myceliam/internal/models"
+	"myceliam/internal/oidc"
 	"myceliam/internal/operr"
 )
 
@@ -82,7 +83,7 @@ func TestServiceAccountReconciler_BlocksProvisioningWhenNamespaceNotAllowed(t *t
 	}
 	c := newTestClient(t, sa, newAllowlist("some-other-namespace"))
 	fp := &fakeOIDCProvider{secretClientID: "my-app", secretClientSecret: "s3cr3t"}
-	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDC: fp}}
+	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDCProviders: map[string]oidc.Provider{"keycloak": fp}, OperatorOIDC: fp}}
 
 	result, err := r.Reconcile(context.Background(), reconcileRequest("demo", "my-app"))
 	if err != nil {
@@ -111,7 +112,7 @@ func TestServiceAccountReconciler_CleanupIgnoresAllowlist(t *testing.T) {
 	// the allowlist only ever gates provisioning, never cleanup).
 	c := newTestClient(t, sa, newAllowlist("some-other-namespace"))
 	fp := &fakeOIDCProvider{}
-	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDC: fp}}
+	r := &ServiceAccountReconciler{Deps: &Deps{Client: c, Settings: testSettings(t), OIDCProviders: map[string]oidc.Provider{"keycloak": fp}, OperatorOIDC: fp}}
 
 	if _, err := r.Reconcile(context.Background(), reconcileRequest("demo", "my-app")); err != nil {
 		t.Fatalf("unexpected error: %v", err)

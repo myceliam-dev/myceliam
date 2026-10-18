@@ -89,7 +89,7 @@ func NewProvider(ctx context.Context, settings *config.Settings, k8sClient clien
 // buildTokenSource implements the secret auto-detection described on
 // AdminSecretName/AdminKeypairSecretName above, reusing
 // k8shelpers.ReadSecretKeyIfPresent — the same helper clienttype=signedjwt
-// apps use to read their own <sa-name>-oidc-credentials secret.
+// apps use to read their own credentials secret.
 func buildTokenSource(ctx context.Context, k8sClient client.Client, settings *config.Settings, gc *gocloak.GoCloak) (tokenSource, error) {
 	ns := settings.SystemNamespace
 
@@ -260,11 +260,14 @@ func (p *KeycloakProvider) EnsureSecretClient(ctx context.Context, spec *models.
 }
 
 // EnsureSignedjwtClient ensures a signed-JWT (private_key_jwt) client exists
-// with the given JWKS. Returns clientID.
-func (p *KeycloakProvider) EnsureSignedjwtClient(ctx context.Context, spec *models.ClientSpec, jwksString string) (string, error) {
+// with the given JWKS. Returns clientID; echoes kid straight back as
+// actualKid, since Keycloak never reassigns the JWKS's own kid — see
+// oidc.Provider.EnsureSignedjwtClient's doc comment. certPEM is unused here —
+// Keycloak's jwks.string client attribute takes the JWKS document directly.
+func (p *KeycloakProvider) EnsureSignedjwtClient(ctx context.Context, spec *models.ClientSpec, certPEM []byte, jwksString, kid string) (clientID, actualKid string, err error) {
 	token, err := p.auth.Token(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	realm := spec.Realm
 
@@ -287,23 +290,23 @@ func (p *KeycloakProvider) EnsureSignedjwtClient(ctx context.Context, spec *mode
 
 	internalID, attrs, found, err := p.admin.FindClient(ctx, token, realm, spec.ClientName)
 	if err != nil {
-		return "", operr.Temporaryf(adminCallDelay, "Error provisioning signedjwt client '%s' in realm '%s': %v", spec.ClientName, realm, err)
+		return "", "", operr.Temporaryf(adminCallDelay, "Error provisioning signedjwt client '%s' in realm '%s': %v", spec.ClientName, realm, err)
 	}
 	if !found {
 		internalID, err = p.admin.CreateClient(ctx, token, realm, payload)
 	} else if err := verifyClusterOwnership("client", spec.ClientName, attrs, p.settings.ClusterID); err != nil {
-		return "", err
+		return "", "", err
 	} else {
 		err = p.admin.UpdateClient(ctx, token, realm, internalID, payload)
 	}
 	if err != nil {
-		return "", operr.Temporaryf(adminCallDelay, "Error provisioning signedjwt client '%s' in realm '%s': %v", spec.ClientName, realm, err)
+		return "", "", operr.Temporaryf(adminCallDelay, "Error provisioning signedjwt client '%s' in realm '%s': %v", spec.ClientName, realm, err)
 	}
 	if err := demoteDefaultScopesToOptional(ctx, p.admin, token, realm, internalID); err != nil {
-		return "", operr.Temporaryf(adminCallDelay, "Error demoting default scopes for client '%s' in realm '%s': %v", spec.ClientName, realm, err)
+		return "", "", operr.Temporaryf(adminCallDelay, "Error demoting default scopes for client '%s' in realm '%s': %v", spec.ClientName, realm, err)
 	}
 
-	return spec.ClientName, nil
+	return spec.ClientName, kid, nil
 }
 
 // demoteDefaultScopesToOptional moves every one of clientID's current default
@@ -351,19 +354,30 @@ func (p *KeycloakProvider) DeleteClient(ctx context.Context, tenantID, clientNam
 	return nil
 }
 
+// IssuerURL: a Keycloak realm has exactly one issuer regardless of which
+// cloud a caller is federating for.
 func (p *KeycloakProvider) IssuerURL(tenantID string) (string, error) {
 	return fmt.Sprintf("%s/realms/%s", strings.TrimRight(p.settings.KeycloakURL, "/"), tenantID), nil
 }
 
-func (p *KeycloakProvider) EnsureAccessScope(ctx context.Context, tenantID, clientName, scopeName, audience string) error {
+// EnsureAccessScope's azpValue return is just clientName itself — Keycloak
+// always sets a client's client_id (and therefore its tokens' azp) to
+// clientName by construction, see oidc.Provider.EnsureAccessScope's doc
+// comment for why callers need this at all.
+func (p *KeycloakProvider) EnsureAccessScope(ctx context.Context, tenantID, clientName, scopeName, audience string) (string, error) {
 	token, err := p.auth.Token(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return ensureAccessScope(ctx, p.admin, token, tenantID, clientName, scopeName, audience)
+	if err := ensureAccessScope(ctx, p.admin, token, tenantID, clientName, scopeName, audience); err != nil {
+		return "", err
+	}
+	return clientName, nil
 }
 
-func (p *KeycloakProvider) DeleteAccessScope(ctx context.Context, tenantID, scopeName string) error {
+// DeleteAccessScope ignores clientName: scopeName already identifies a
+// disposable, per-SA-unique client scope object, safe to delete outright.
+func (p *KeycloakProvider) DeleteAccessScope(ctx context.Context, tenantID, clientName, scopeName string) error {
 	token, err := p.auth.Token(ctx)
 	if err != nil {
 		return err

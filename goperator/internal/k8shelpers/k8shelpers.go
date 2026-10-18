@@ -94,18 +94,22 @@ func ReadSecretKeyIfPresent(ctx context.Context, c client.Client, namespace, sec
 }
 
 // CreateTLSSecretIfAbsent creates a kubernetes.io/tls Secret holding an
-// operator-generated keypair.
+// operator-generated keypair, annotated with annotations (see
+// models.ServiceAccountAnnotation — every caller passes at least that one,
+// so SecretReconciler can recover the owning ServiceAccount without parsing
+// the secret's own name).
 //
 // Only ever called after ReadSecretKeyIfPresent confirmed the secret doesn't
 // exist yet, so this never overwrites a pre-existing (e.g. user- or
 // cert-manager-provided) secret. A 409 means another reconcile won the race
 // to create it first, which is fine — the next reconcile will just read the
 // winner's cert.
-func CreateTLSSecretIfAbsent(ctx context.Context, c client.Client, namespace, secretName string, certPEM, keyPEM []byte, owner metav1.OwnerReference) error {
+func CreateTLSSecretIfAbsent(ctx context.Context, c client.Client, namespace, secretName string, certPEM, keyPEM []byte, annotations map[string]string, owner metav1.OwnerReference) error {
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:            secretName,
 			Namespace:       namespace,
+			Annotations:     annotations,
 			OwnerReferences: []metav1.OwnerReference{owner},
 		},
 		Type: corev1.SecretTypeTLS,
@@ -124,8 +128,9 @@ func CreateTLSSecretIfAbsent(ctx context.Context, c client.Client, namespace, se
 }
 
 // WriteCredentialsSecret creates or updates an Opaque Secret with the given
-// string data.
-func WriteCredentialsSecret(ctx context.Context, c client.Client, namespace, secretName string, data map[string]string, owner metav1.OwnerReference) error {
+// string data and annotations (see CreateTLSSecretIfAbsent's doc comment on
+// why every caller passes models.ServiceAccountAnnotation).
+func WriteCredentialsSecret(ctx context.Context, c client.Client, namespace, secretName string, data, annotations map[string]string, owner metav1.OwnerReference) error {
 	byteData := make(map[string][]byte, len(data))
 	for k, v := range data {
 		byteData[k] = []byte(v)
@@ -141,6 +146,7 @@ func WriteCredentialsSecret(ctx context.Context, c client.Client, namespace, sec
 			ObjectMeta: metav1.ObjectMeta{
 				Name:            secretName,
 				Namespace:       namespace,
+				Annotations:     annotations,
 				OwnerReferences: []metav1.OwnerReference{owner},
 			},
 			Type: corev1.SecretTypeOpaque,
@@ -153,6 +159,7 @@ func WriteCredentialsSecret(ctx context.Context, c client.Client, namespace, sec
 	}
 
 	existing.OwnerReferences = []metav1.OwnerReference{owner}
+	existing.Annotations = annotations
 	existing.Type = corev1.SecretTypeOpaque
 	existing.Data = byteData
 	if err := c.Update(ctx, &existing); err != nil {

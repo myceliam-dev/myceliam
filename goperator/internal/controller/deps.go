@@ -23,7 +23,18 @@ const finalizerName = "myceliam.io/finalizer"
 type Deps struct {
 	Client   client.Client
 	Settings *config.Settings
-	// OIDC is nil when Settings.OidcProvider == "none" — deployments that
-	// only ever use clienttype=spiffe ServiceAccounts. See requireOIDC.
-	OIDC oidc.Provider
+	// OIDCProviders holds one entry per config.Settings.ActiveProviders() —
+	// the operator provisions workload ServiceAccounts against every one of
+	// these simultaneously. Empty (not nil) when no provider is active —
+	// deployments that only ever use clienttype=spiffe ServiceAccounts. See
+	// resolveProviderName/requireOIDC.
+	OIDCProviders map[string]oidc.Provider
+	// OperatorOIDC is the operator's OWN identity — resolved once at startup
+	// from Settings.OperatorProvider (a lookup into OIDCProviders, or nil iff
+	// OperatorProvider=="spiffe"). Used only for the operator's own AWS/GCP
+	// bootstrap credentials (operatoridentity.GetAWSCredentials/GetGCPAccessToken
+	// and the cloudaws/cloudgcp calls that need them) — never for a
+	// workload's own provisioning, which always goes through OIDCProviders
+	// instead.
+	OperatorOIDC oidc.Provider
 }

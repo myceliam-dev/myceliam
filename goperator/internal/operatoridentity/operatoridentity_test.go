@@ -48,15 +48,15 @@ func (f *fakeProvider) DeleteTenant(context.Context, string) error { return nil 
 func (f *fakeProvider) EnsureSecretClient(context.Context, *models.ClientSpec) (string, string, error) {
 	return "", "", nil
 }
-func (f *fakeProvider) EnsureSignedjwtClient(context.Context, *models.ClientSpec, string) (string, error) {
-	return "", nil
+func (f *fakeProvider) EnsureSignedjwtClient(context.Context, *models.ClientSpec, []byte, string, string) (string, string, error) {
+	return "", "", nil
 }
 func (f *fakeProvider) DeleteClient(context.Context, string, string) error { return nil }
 func (f *fakeProvider) IssuerURL(string) (string, error)                   { return "", nil }
-func (f *fakeProvider) EnsureAccessScope(context.Context, string, string, string, string) error {
-	return nil
+func (f *fakeProvider) EnsureAccessScope(context.Context, string, string, string, string) (string, error) {
+	return "", nil
 }
-func (f *fakeProvider) DeleteAccessScope(context.Context, string, string) error { return nil }
+func (f *fakeProvider) DeleteAccessScope(context.Context, string, string, string) error { return nil }
 func (f *fakeProvider) GetOperatorToken(context.Context) (string, error) {
 	f.calls++
 	return f.operatorToken, f.err
@@ -87,7 +87,7 @@ func TestGetOperatorTokenRequiresProviderWhenNotSpiffe(t *testing.T) {
 
 func TestGetOperatorTokenDispatchesToSpiffeWhenConfigured(t *testing.T) {
 	settings := testSettings(t, map[string]string{
-		"OPERATOR_IDENTITY_SOURCE": "spiffe",
+		"OPERATOR_PROVIDER":        "spiffe",
 		"OPERATOR_SPIFFE_AUDIENCE": "myceliam-operator",
 	})
 	t.Setenv(spiffeEndpointSocketEnv, "unix:///spiffe-workload-api/spire-agent.sock")
@@ -116,7 +116,7 @@ func TestGetOperatorTokenDispatchesToSpiffeWhenConfigured(t *testing.T) {
 
 func TestGetOperatorSpiffeTokenRequiresAudience(t *testing.T) {
 	t.Setenv(spiffeEndpointSocketEnv, "unix:///spiffe-workload-api/spire-agent.sock")
-	settings := testSettings(t, map[string]string{"OPERATOR_IDENTITY_SOURCE": "spiffe"})
+	settings := testSettings(t, map[string]string{"OPERATOR_PROVIDER": "spiffe"})
 
 	_, err := getOperatorSpiffeToken(context.Background(), settings)
 	if _, ok := operr.AsPermanent(err); !ok {
@@ -127,7 +127,7 @@ func TestGetOperatorSpiffeTokenRequiresAudience(t *testing.T) {
 func TestGetOperatorSpiffeTokenRequiresSocketEnvVar(t *testing.T) {
 	t.Setenv(spiffeEndpointSocketEnv, "")
 	settings := testSettings(t, map[string]string{
-		"OPERATOR_IDENTITY_SOURCE": "spiffe",
+		"OPERATOR_PROVIDER":        "spiffe",
 		"OPERATOR_SPIFFE_AUDIENCE": "myceliam-operator",
 	})
 

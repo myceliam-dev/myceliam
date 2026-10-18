@@ -1,0 +1,66 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myceliam-operator
+  namespace: myceliam-system
+spec:
+  replicas: 1
+  # The operator runs with no leader election (single-instance, matching
+  # kopf's --standalone mode) — Kubernetes' default RollingUpdate strategy
+  # briefly runs the old and new pod together on every redeploy, and two
+  # uncoordinated operator processes reconciling the same objects at once
+  # can race (confirmed live: produced two duplicate Auth0 Applications for
+  # the same ServiceAccount). Recreate guarantees the old pod fully stops
+  # before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: myceliam-operator
+  template:
+    metadata:
+      labels:
+        app: myceliam-operator
+    spec:
+      serviceAccountName: myceliam-operator
+      containers:
+        - name: operator
+          image: myceliam-operator:test
+          imagePullPolicy: IfNotPresent
+          env:
+            # Distinct from the local minikube deployment's cluster-id —
+            # every cluster sharing this same Keycloak/AWS/GCP backend needs
+            # its own unique value.
+            - name: MYCELIAM_CLUSTER_ID
+              value: <>
+            - name: MYCELIAM_KEYCLOAK_URL
+              value: <>
+            - name: MYCELIAM_KEYCLOAK_ADMIN_REALM
+              value: "master"
+            - name: MYCELIAM_KEYCLOAK_CLIENT_ID
+              value: "myceliam-operator-tls"
+            - name: MYCELIAM_KEYCLOAK_OPERATOR_SCOPE
+              value: <>
+            # MYCELIAM_OPERATOR_PROVIDER auto-resolves to "keycloak" when it's
+            # the only active provider (not set here), so this deployment
+            # uses the SAME credential — from
+            # keycloak-client-secret.yaml or keycloak-tls-secret.yaml, whichever you
+            # applied — for both the Admin REST API and the operator's own
+            # AWS/GCP federation token. See spiffe/spiffe-operator.yaml
+            # instead if you want the operator's cloud-federation token to
+            # come from SPIRE while still using Keycloak for the Admin API.
+            #
+            # Not secrets — same bootstrap hub-project WLI pool/provider and
+            # service account the local minikube cluster's operator already
+            # uses, since both share the same external GCP project.
+            - name: MYCELIAM_GCP_OPERATOR_STS_AUDIENCE
+              value: "//iam.googleapis.com/projects/<>/locations/global/workloadIdentityPools/<>/providers/<>"
+            - name: MYCELIAM_GCP_OPERATOR_SERVICE_ACCOUNT_EMAIL
+              value: <>
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi

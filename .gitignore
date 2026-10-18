@@ -2,8 +2,11 @@
 .claude/
 
 # Docker image tarballs built for manual transfer to remote clusters
-# (example-*-client/*.tar.gz) — regenerate with docker build/save, never commit.
+# (example-*-client/*.tar.gz, dist/*.tar from docker buildx -o type=docker) —
+# regenerate with docker build/buildx, never commit.
 *.tar.gz
+*.tar
+/dist/
 
 # Private key material that might get generated locally while following the
 # README (e.g. operator/app signed-JWT bootstrap certs) — never intended to
@@ -17,6 +20,11 @@
 # extension to distinguish it from source.
 /example-oidc-client/example-oidc-client
 /example-spiffe-client/example-spiffe-client
+
+# Scratch/local-only files (e.g. real credentials dropped in the repo root
+# while testing against a live IdP) — the "z_" prefix is a personal
+# never-commit-this convention, not a project one.
+z_*
 
 # OS cruft
 .DS_Store

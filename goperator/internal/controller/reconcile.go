@@ -24,24 +24,83 @@ import (
 
 const profileWaitDelay = 20 * time.Second
 
-// requireOIDC mirrors handlers.py's _require_oidc: secret/signedjwt SAs need
-// an actual oidc.Provider — unlike spiffe, which never touches it at all.
-// Only reachable at all when MYCELIAM_OIDC_PROVIDER=none was chosen
-// deliberately (an unrecognized provider name fails fast at Settings
-// construction; a recognized-but-unimplemented one fails fast at startup
-// inside oidc.GetProvider) — so by the time any reconciler runs, deps.OIDC is
-// only ever nil because "none" was chosen on purpose.
-func requireOIDC(deps *Deps, namespace, name string) (oidc.Provider, error) {
-	if deps.OIDC == nil {
-		return nil, operr.Permanentf(
-			"ServiceAccount '%s/%s' needs a Keycloak/Okta/Auth0-backed client "+
-				"(clienttype=secret/signedjwt), but MYCELIAM_OIDC_PROVIDER is 'none' "+
-				"— set it to 'keycloak' (or another supported provider) to use this client "+
-				"type, or use clienttype=spiffe instead if this ServiceAccount doesn't need one.",
+// resolveProviderName picks which of deps.OIDCProviders a given
+// ServiceAccount uses: the myceliam.io/oidc-provider label if set (validated
+// against the actually-active set), else the sole active provider when
+// there's exactly one (so a single-provider deployment needs no label at
+// all), else an error demanding the label when more than one provider is
+// active, else an error when none are configured at all.
+func resolveProviderName(deps *Deps, namespace, name string, labels map[string]string) (string, error) {
+	if v, ok := labels[models.OidcProviderLabel]; ok && v != "" {
+		if _, exists := deps.OIDCProviders[v]; !exists {
+			return "", operr.Permanentf(
+				"ServiceAccount '%s/%s' requests '%s=%s', but no OIDC provider config for "+
+					"%q is active on this operator (active: %v)",
+				namespace, name, models.OidcProviderLabel, v, v, activeProviderNames(deps),
+			)
+		}
+		return v, nil
+	}
+	switch len(deps.OIDCProviders) {
+	case 1:
+		for k := range deps.OIDCProviders {
+			return k, nil
+		}
+	case 0:
+		return "", operr.Permanentf(
+			"ServiceAccount '%s/%s' needs a Keycloak/Auth0-backed client "+
+				"(clienttype=secret/signedjwt), but no OIDC provider is configured on this "+
+				"operator (set MYCELIAM_KEYCLOAK_URL / "+
+				"MYCELIAM_AUTH0_DOMAIN+MYCELIAM_AUTH0_OPERATOR_CLIENT_ID to use this client "+
+				"type, or use clienttype=spiffe instead if this ServiceAccount doesn't need one).",
 			namespace, name,
 		)
 	}
-	return deps.OIDC, nil
+	return "", operr.Permanentf(
+		"ServiceAccount '%s/%s' must set label '%s' — more than one OIDC provider is "+
+			"configured on this operator (active: %v) and none can be inferred as a default.",
+		namespace, name, models.OidcProviderLabel, activeProviderNames(deps),
+	)
+}
+
+// operatorClientIdentifiers returns the client_id/audience strings that
+// identify the operator's own bootstrap identity for providerName — only
+// non-empty when the operator actually uses that provider for its own
+// AWS/GCP credentials (deps.Settings.OperatorProvider == providerName).
+// Passed to cloudaws.DeleteIdp so it refuses to delete an IAM OIDC provider
+// the operator itself still depends on — see DeleteIdp's own doc comment
+// for the live incident this guards against.
+func operatorClientIdentifiers(deps *Deps, providerName string) []string {
+	if deps.Settings.OperatorProvider != providerName {
+		return nil
+	}
+	switch providerName {
+	case "keycloak":
+		return []string{deps.Settings.KeycloakClientID}
+	case "auth0":
+		return []string{deps.Settings.Auth0OperatorClientID, deps.Settings.Auth0OperatorAudience}
+	default:
+		return nil
+	}
+}
+
+func activeProviderNames(deps *Deps) []string {
+	names := make([]string, 0, len(deps.OIDCProviders))
+	for k := range deps.OIDCProviders {
+		names = append(names, k)
+	}
+	return names
+}
+
+// requireOIDC resolves both the provider name and the *oidc.Provider
+// instance a ServiceAccount uses — see resolveProviderName for the selection
+// rules.
+func requireOIDC(deps *Deps, namespace, name string, labels map[string]string) (string, oidc.Provider, error) {
+	providerName, err := resolveProviderName(deps, namespace, name, labels)
+	if err != nil {
+		return "", nil, err
+	}
+	return providerName, deps.OIDCProviders[providerName], nil
 }
 
 // reconcileClient mirrors handlers.py's _reconcile: ensures the realm/client
@@ -52,18 +111,20 @@ func reconcileClient(ctx context.Context, deps *Deps, namespace, name string, la
 		return err
 	}
 
-	oidcProvider, err := requireOIDC(deps, namespace, name)
+	providerName, oidcProvider, err := requireOIDC(deps, namespace, name, labels)
 	if err != nil {
 		return err
 	}
 
-	spec, err := models.ParseClientSpec(namespace, name, labels, deps.Settings)
+	spec, err := models.ParseClientSpec(namespace, name, labels, providerName, deps.Settings)
 	if err != nil {
 		return err
 	}
 	if err := oidcProvider.EnsureTenant(ctx, spec.Realm); err != nil {
 		return err
 	}
+
+	ownerAnnotations := map[string]string{models.ServiceAccountAnnotation: name}
 
 	if spec.ClientType == models.ClientTypeSecret {
 		clientID, clientSecret, err := oidcProvider.EnsureSecretClient(ctx, spec)
@@ -78,7 +139,7 @@ func reconcileClient(ctx context.Context, deps *Deps, namespace, name string, la
 			"client_id":     clientID,
 			"client_secret": clientSecret,
 			"issuer":        issuerURL,
-		}, owner)
+		}, ownerAnnotations, owner)
 	}
 
 	certPEM, found, err := k8shelpers.ReadSecretKeyIfPresent(ctx, deps.Client, namespace, spec.CredentialsSecretName, corev1.TLSCertKey)
@@ -91,16 +152,26 @@ func reconcileClient(ctx context.Context, deps *Deps, namespace, name string, la
 		if err != nil {
 			return err
 		}
-		if err := k8shelpers.CreateTLSSecretIfAbsent(ctx, deps.Client, namespace, spec.CredentialsSecretName, certPEM, keyPEM, owner); err != nil {
+		if err := k8shelpers.CreateTLSSecretIfAbsent(ctx, deps.Client, namespace, spec.CredentialsSecretName, certPEM, keyPEM, ownerAnnotations, owner); err != nil {
 			return err
 		}
+	}
+	jwk, err := jwks.PemCertToJWK(certPEM)
+	if err != nil {
+		return err
 	}
 	jwksString, err := jwks.PemCertToJWKSString(certPEM)
 	if err != nil {
 		return err
 	}
-	_, err = oidcProvider.EnsureSignedjwtClient(ctx, spec, jwksString)
-	return err
+	clientID, actualKid, err := oidcProvider.EnsureSignedjwtClient(ctx, spec, certPEM, jwksString, jwk.Kid)
+	if err != nil {
+		return err
+	}
+	return k8shelpers.WriteCredentialsSecret(ctx, deps.Client, namespace, spec.MetadataSecretName, map[string]string{
+		"client_id": clientID,
+		"kid":       actualKid,
+	}, ownerAnnotations, owner)
 }
 
 // reconcileCloud mirrors handlers.py's _reconcile_cloud, extended for C:
@@ -116,7 +187,12 @@ func reconcileCloud(ctx context.Context, deps *Deps, namespace, saName string, l
 		return err
 	}
 
-	specs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, labels, annotations, deps.Settings)
+	providerName, oidcProvider, err := requireOIDC(deps, namespace, saName, labels)
+	if err != nil {
+		return err
+	}
+
+	specs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, labels, annotations, providerName, deps.Settings)
 	if err != nil {
 		return err
 	}
@@ -124,17 +200,14 @@ func reconcileCloud(ctx context.Context, deps *Deps, namespace, saName string, l
 		return nil
 	}
 
-	oidcProvider, err := requireOIDC(deps, namespace, saName)
-	if err != nil {
-		return err
-	}
 	issuerURL, err := oidcProvider.IssuerURL(models.RealmForNamespace(namespace, deps.Settings))
 	if err != nil {
 		return err
 	}
 
 	for _, spec := range specs {
-		if err := oidcProvider.EnsureAccessScope(ctx, models.RealmForNamespace(namespace, deps.Settings), saName, spec.ScopeName, spec.Audience); err != nil {
+		azpValue, err := oidcProvider.EnsureAccessScope(ctx, models.RealmForNamespace(namespace, deps.Settings), saName, spec.ScopeName, spec.Audience)
+		if err != nil {
 			return err
 		}
 
@@ -147,16 +220,23 @@ func reconcileCloud(ctx context.Context, deps *Deps, namespace, saName string, l
 			if !found {
 				return operr.Temporaryf(profileWaitDelay, "AwsAccessProfile '%s/%s' referenced by ServiceAccount '%s/%s' not found yet; will retry", namespace, spec.ProfileName, namespace, saName)
 			}
+			// azpValue may already equal saName (Keycloak) — dedupe so
+			// ClientIDList/EnsureIdp's existing-entries check doesn't try to
+			// add the same client ID twice.
+			audiences := []string{spec.Audience, saName}
+			if azpValue != "" && azpValue != saName {
+				audiences = append(audiences, azpValue)
+			}
 			for accountID, roles := range profile.Accounts {
-				creds, err := operatoridentity.GetAWSCredentials(ctx, deps.Settings, accountID, deps.OIDC)
+				creds, err := operatoridentity.GetAWSCredentials(ctx, deps.Settings, accountID, deps.OperatorOIDC)
 				if err != nil {
 					return err
 				}
-				if err := cloudaws.EnsureIdp(ctx, accountID, issuerURL, []string{spec.Audience, saName}, creds); err != nil {
+				if err := cloudaws.EnsureIdp(ctx, accountID, issuerURL, audiences, creds); err != nil {
 					return err
 				}
 				for _, role := range roles {
-					if err := cloudaws.EnsureRoleTrust(ctx, accountID, role, issuerURL, spec.Audience, "azp", saName, creds); err != nil {
+					if err := cloudaws.EnsureRoleTrust(ctx, accountID, role, issuerURL, spec.Audience, spec.SubjectClaim, saName, azpValue, spec.SharedAudience, spec.SubjectClaimViaSessionTag, creds); err != nil {
 						return err
 					}
 				}
@@ -171,11 +251,11 @@ func reconcileCloud(ctx context.Context, deps *Deps, namespace, saName string, l
 				return operr.Temporaryf(profileWaitDelay, "GcpAccessProfile '%s/%s' referenced by ServiceAccount '%s/%s' not found yet; will retry", namespace, spec.ProfileName, namespace, saName)
 			}
 			for projectID, emails := range profile.Projects {
-				if err := cloudgcp.EnsureIdp(ctx, projectID, namespace, issuerURL, spec.Audience, deps.Settings, cloudgcp.KindOIDC, deps.OIDC); err != nil {
+				if err := cloudgcp.EnsureIdp(ctx, projectID, namespace, issuerURL, spec.Audience, deps.Settings, cloudgcp.KindOIDC, providerName, deps.OperatorOIDC); err != nil {
 					return err
 				}
 				for _, email := range emails {
-					if err := cloudgcp.GrantImpersonation(ctx, email, projectID, saName, deps.Settings, deps.OIDC); err != nil {
+					if err := cloudgcp.GrantImpersonation(ctx, email, projectID, saName, deps.Settings, deps.OperatorOIDC); err != nil {
 						return err
 					}
 				}
@@ -201,17 +281,17 @@ func siblingsStillActive(sas []corev1.ServiceAccount, excludeName string) bool {
 // ServiceAccount in the namespace still references the same profile. Never
 // gated on the AutoidpAllowlist — cleanup must always be able to proceed
 // regardless of a namespace's current allowlist status.
-func cleanupCloud(ctx context.Context, deps *Deps, namespace, saName string, specs []cloudmodels.CloudFederationSpec) error {
+func cleanupCloud(ctx context.Context, deps *Deps, namespace, saName string, labels map[string]string, specs []cloudmodels.CloudFederationSpec) error {
 	if len(specs) == 0 {
 		return nil
 	}
-	oidcProvider, err := requireOIDC(deps, namespace, saName)
+	providerName, oidcProvider, err := requireOIDC(deps, namespace, saName, labels)
 	if err != nil {
 		return err
 	}
 
 	for _, spec := range specs {
-		if err := oidcProvider.DeleteAccessScope(ctx, models.RealmForNamespace(namespace, deps.Settings), spec.ScopeName); err != nil {
+		if err := oidcProvider.DeleteAccessScope(ctx, models.RealmForNamespace(namespace, deps.Settings), saName, spec.ScopeName); err != nil {
 			return err
 		}
 
@@ -243,19 +323,19 @@ func cleanupCloud(ctx context.Context, deps *Deps, namespace, saName string, spe
 				return err
 			}
 			for accountID, roles := range profile.Accounts {
-				creds, err := operatoridentity.GetAWSCredentials(ctx, deps.Settings, accountID, deps.OIDC)
+				creds, err := operatoridentity.GetAWSCredentials(ctx, deps.Settings, accountID, deps.OperatorOIDC)
 				if err != nil {
 					return err
 				}
 				for _, role := range roles {
-					if err := cloudaws.RemoveRoleTrust(ctx, accountID, role, issuerURL, "azp", saName, creds); err != nil {
+					if err := cloudaws.RemoveRoleTrust(ctx, accountID, role, issuerURL, spec.SubjectClaim, saName, creds); err != nil {
 						return err
 					}
 				}
-				if stillActive {
+				if stillActive || spec.IssuerShared {
 					err = cloudaws.RemoveAudience(ctx, accountID, issuerURL, saName, creds)
 				} else {
-					err = cloudaws.DeleteIdp(ctx, accountID, issuerURL, creds)
+					err = cloudaws.DeleteIdp(ctx, accountID, issuerURL, operatorClientIdentifiers(deps, providerName), creds)
 				}
 				if err != nil {
 					return err
@@ -272,12 +352,12 @@ func cleanupCloud(ctx context.Context, deps *Deps, namespace, saName string, spe
 			}
 			for projectID, emails := range profile.Projects {
 				for _, email := range emails {
-					if err := cloudgcp.RevokeImpersonation(ctx, email, projectID, saName, deps.Settings, deps.OIDC); err != nil {
+					if err := cloudgcp.RevokeImpersonation(ctx, email, projectID, saName, deps.Settings, deps.OperatorOIDC); err != nil {
 						return err
 					}
 				}
 				if !stillActive {
-					if err := cloudgcp.DeleteIdp(ctx, projectID, namespace, deps.Settings, cloudgcp.KindOIDC, deps.OIDC); err != nil {
+					if err := cloudgcp.DeleteIdp(ctx, projectID, namespace, deps.Settings, cloudgcp.KindOIDC, providerName, deps.OperatorOIDC); err != nil {
 						return err
 					}
 				}
@@ -311,7 +391,7 @@ func reconcileSpiffe(ctx context.Context, deps *Deps, namespace, saName string, 
 		)
 	}
 
-	specs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, labels, annotations, deps.Settings)
+	specs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, labels, annotations, "", deps.Settings)
 	if err != nil {
 		return err
 	}
@@ -339,7 +419,7 @@ func reconcileSpiffe(ctx context.Context, deps *Deps, namespace, saName string, 
 				return operr.Temporaryf(profileWaitDelay, "AwsAccessProfile '%s/%s' referenced by ServiceAccount '%s/%s' not found yet; will retry", namespace, spec.ProfileName, namespace, saName)
 			}
 			for accountID, roles := range profile.Accounts {
-				creds, err := operatoridentity.GetAWSCredentials(ctx, deps.Settings, accountID, deps.OIDC)
+				creds, err := operatoridentity.GetAWSCredentials(ctx, deps.Settings, accountID, deps.OperatorOIDC)
 				if err != nil {
 					return err
 				}
@@ -347,7 +427,7 @@ func reconcileSpiffe(ctx context.Context, deps *Deps, namespace, saName string, 
 					return err
 				}
 				for _, role := range roles {
-					if err := cloudaws.EnsureRoleTrust(ctx, accountID, role, jwtIssuer, spec.Audience, "sub", spiffeID, creds); err != nil {
+					if err := cloudaws.EnsureRoleTrust(ctx, accountID, role, jwtIssuer, spec.Audience, "sub", spiffeID, "", spec.SharedAudience, false, creds); err != nil {
 						return err
 					}
 				}
@@ -362,11 +442,11 @@ func reconcileSpiffe(ctx context.Context, deps *Deps, namespace, saName string, 
 				return operr.Temporaryf(profileWaitDelay, "GcpAccessProfile '%s/%s' referenced by ServiceAccount '%s/%s' not found yet; will retry", namespace, spec.ProfileName, namespace, saName)
 			}
 			for projectID, emails := range profile.Projects {
-				if err := cloudgcp.EnsureIdp(ctx, projectID, namespace, jwtIssuer, spec.Audience, deps.Settings, cloudgcp.KindSpiffe, deps.OIDC); err != nil {
+				if err := cloudgcp.EnsureIdp(ctx, projectID, namespace, jwtIssuer, spec.Audience, deps.Settings, cloudgcp.KindSpiffe, "", deps.OperatorOIDC); err != nil {
 					return err
 				}
 				for _, email := range emails {
-					if err := cloudgcp.GrantImpersonation(ctx, email, projectID, spiffeID, deps.Settings, deps.OIDC); err != nil {
+					if err := cloudgcp.GrantImpersonation(ctx, email, projectID, spiffeID, deps.Settings, deps.OperatorOIDC); err != nil {
 						return err
 					}
 				}
@@ -415,7 +495,7 @@ func cleanupSpiffeSpecs(ctx context.Context, deps *Deps, namespace, saName strin
 				continue
 			}
 			for accountID, roles := range profile.Accounts {
-				creds, err := operatoridentity.GetAWSCredentials(ctx, deps.Settings, accountID, deps.OIDC)
+				creds, err := operatoridentity.GetAWSCredentials(ctx, deps.Settings, accountID, deps.OperatorOIDC)
 				if err != nil {
 					return err
 				}
@@ -444,13 +524,13 @@ func cleanupSpiffeSpecs(ctx context.Context, deps *Deps, namespace, saName strin
 			for projectID, emails := range profile.Projects {
 				if spiffeID != "" {
 					for _, email := range emails {
-						if err := cloudgcp.RevokeImpersonation(ctx, email, projectID, spiffeID, deps.Settings, deps.OIDC); err != nil {
+						if err := cloudgcp.RevokeImpersonation(ctx, email, projectID, spiffeID, deps.Settings, deps.OperatorOIDC); err != nil {
 							return err
 						}
 					}
 				}
 				if !stillActive {
-					if err := cloudgcp.DeleteIdp(ctx, projectID, namespace, deps.Settings, cloudgcp.KindSpiffe, deps.OIDC); err != nil {
+					if err := cloudgcp.DeleteIdp(ctx, projectID, namespace, deps.Settings, cloudgcp.KindSpiffe, "", deps.OperatorOIDC); err != nil {
 						return err
 					}
 				}
@@ -466,7 +546,7 @@ func cleanupSpiffeSpecs(ctx context.Context, deps *Deps, namespace, saName strin
 func cleanupSpiffe(ctx context.Context, deps *Deps, namespace, saName string, labels, annotations map[string]string) error {
 	jwtIssuer := annotations[models.SpiffeJWTIssuerAnnotation]
 	spiffeID := annotations[models.SpiffeIDAnnotation]
-	specs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, labels, annotations, deps.Settings)
+	specs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, labels, annotations, "", deps.Settings)
 	if err != nil {
 		// A departing SA with an already-invalid spec (e.g. role annotation
 		// removed without removing the profile label first) shouldn't block
@@ -478,16 +558,26 @@ func cleanupSpiffe(ctx context.Context, deps *Deps, namespace, saName string, la
 
 // removedSpecs mirrors handlers.py's _removed_specs: specs present under
 // oldLabels/oldAnnotations but no longer present under labels/annotations (a
-// profile label removed, or changed to a different profile).
+// profile label removed, or changed to a different profile). Resolves the
+// provider name itself from the *current* labels (empty for spiffe SAs,
+// which have no OIDC workload provider at all) and reuses it for both the
+// old and current parse — an SA changing which provider it uses mid-lifecycle
+// isn't a case this diff needs to handle precisely, since that's a much
+// bigger change (different backend entirely) than a profile label flip.
 func removedSpecs(namespace, saName string, oldLabels, oldAnnotations, labels, annotations map[string]string, deps *Deps) []cloudmodels.CloudFederationSpec {
-	oldSpecs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, oldLabels, oldAnnotations, deps.Settings)
+	var providerName string
+	if labels[models.ClientTypeLabel] != string(models.ClientTypeSpiffe) {
+		providerName, _ = resolveProviderName(deps, namespace, saName, labels)
+	}
+
+	oldSpecs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, oldLabels, oldAnnotations, providerName, deps.Settings)
 	if err != nil {
 		// The recorded "old" state was already invalid (shouldn't normally
 		// happen — it must have passed validation to be recorded in the
 		// first place) — nothing reliable to diff against.
 		return nil
 	}
-	currentSpecs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, labels, annotations, deps.Settings)
+	currentSpecs, err := cloudmodels.ParseCloudFederationSpecs(namespace, saName, labels, annotations, providerName, deps.Settings)
 	if err != nil {
 		// Current state doesn't parse (e.g. role annotation just removed) —
 		// treat every old spec as removed rather than failing this diff.
@@ -536,13 +626,4 @@ func refreshServiceAccountsForProfile(ctx context.Context, deps *Deps, namespace
 		}
 	}
 	return nil
-}
-
-// owningSAName mirrors handlers.py's _owning_sa_name.
-func owningSAName(secretName string, deps *Deps) (string, bool) {
-	suffix := deps.Settings.CredentialsSecretSuffix
-	if len(secretName) <= len(suffix) || secretName[len(secretName)-len(suffix):] != suffix {
-		return "", false
-	}
-	return secretName[:len(secretName)-len(suffix)], true
 }

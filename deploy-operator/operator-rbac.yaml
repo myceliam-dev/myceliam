@@ -22,8 +22,9 @@ rules:
   - apiGroups: [""]
     resources: ["serviceaccounts"]
     verbs: ["get", "list", "watch", "update", "patch"]
-  # Reads/writes each ServiceAccount's <name>-oidc-credentials secret (client
-  # secret, or a generated/provided signedjwt keypair), in any namespace a
+  # Reads/writes each ServiceAccount's credentials/metadata secrets (client
+  # secret, or a generated/provided signedjwt keypair plus its client_id/kid
+  # companion — see models.credentialsSecretNames), in any namespace a
   # labeled ServiceAccount may live in.
   - apiGroups: [""]
     resources: ["secrets"]

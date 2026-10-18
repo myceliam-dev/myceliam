@@ -96,11 +96,14 @@ side of the federation handshake.
   Keycloak-managed (`secret`/`signedjwt`) or SPIFFE/SPIRE-issued — without
   changing how AWS/GCP federation gets registered or consumed on the other
   side.
-- **Registration only.** myceliam establishes trust — realms/clients, IAM
-  OIDC providers, Workload Identity providers — never the IAM Role or IAM
-  policy binding that actually grants permissions once federated. That stays
-  with whoever owns the account/project, same as for any other
-  OIDC-federated workload.
+- **Registration and trust, not authorization.** myceliam establishes trust
+  — realms/clients, IAM OIDC providers, Workload Identity providers — and,
+  **AWS only**, will create a referenced IAM Role outright if it doesn't
+  exist yet (trust policy only, no permissions attached — see
+  `cloudaws.EnsureRoleTrust`). It never creates a GCP service account, and on
+  neither cloud does it ever attach or imply the IAM/GCP policy binding that
+  actually grants permissions once federated. That stays with whoever owns
+  the account/project, same as for any other OIDC-federated workload.
 
 Put another way, Kubernetes isn't just where the operator happens to run — a
 CRD *is* the desired-state declaration, and the reconcile loop is the whole
@@ -135,9 +138,11 @@ trust needed for AWS/GCP to accept it:
 
 | `myceliam.io/client-type` | Token source | What the operator does |
 |---|---|---|
-| `secret` | Keycloak, `client_credentials` grant | Creates the realm (namespace-derived) if needed, creates a matching client, writes `client_id`/`client_secret`/`issuer` to `<sa-name>-oidc-credentials` |
-| `signedjwt` | Keycloak, RFC 7523 `private_key_jwt` | Same realm/client creation, but authenticated via a JWKS instead of a secret. If `<sa-name>-oidc-credentials` already exists (`kubernetes.io/tls`, e.g. from cert-manager), the operator reads `tls.crt` and pushes its JWKS to Keycloak; otherwise it generates its own RSA keypair and self-signed cert first. Either way, editing `tls.crt` later is picked up and re-uploaded on the next reconcile — no proactive expiry-based rotation, though |
-| *(unset, SPIFFE annotations present)* | SPIRE JWT-SVID | No Keycloak client at all — only registers the SPIFFE issuer as a trusted OIDC provider on whichever cloud(s) the SA opted into |
+| `secret` | `client_credentials` grant | Creates the realm/tenant (namespace-derived, provider-dependent) if needed, creates a matching client, writes `client_id`/`client_secret`/`issuer` to `<sa-name>-secret-<provider>-credentials` (Opaque) |
+| `signedjwt` | RFC 7523 `private_key_jwt` | Same client creation, but authenticated via a JWKS instead of a secret. If `<sa-name>-jwt-<provider>-credentials` already exists (`kubernetes.io/tls`, e.g. from cert-manager), the operator reads `tls.crt` and pushes its JWKS to the provider; otherwise it generates its own RSA keypair and self-signed cert first. Either way, editing `tls.crt` later is picked up and re-uploaded on the next reconcile — no proactive expiry-based rotation, though. `client_id`/`kid` are written separately to `<sa-name>-jwt-<provider>-metadata` (Opaque) — kept out of the TLS secret so it stays a pure `kubernetes.io/tls` secret, compatible with cert-manager |
+| *(unset, SPIFFE annotations present)* | SPIRE JWT-SVID | No client of any kind — only registers the SPIFFE issuer as a trusted OIDC provider on whichever cloud(s) the SA opted into |
+
+`<provider>` above is whichever OIDC provider this `ServiceAccount` is provisioned against — the operator can have multiple active simultaneously (`keycloak`/`auth0`, each active whenever its own config is present — see `MYCELIAM_KEYCLOAK_URL`/`MYCELIAM_AUTH0_DOMAIN`+`MYCELIAM_AUTH0_OPERATOR_CLIENT_ID` below), not a single global choice. A `ServiceAccount` picks which one via `myceliam.io/oidc-provider` — optional when exactly one provider is active (it's inferred automatically), required whenever more than one is. Folding the resolved provider name into the secret name means two different providers' credentials for the same `ServiceAccount` never collide on one secret. Every credentials/metadata secret the operator writes also carries a `myceliam.io/service-account` annotation naming its owning `ServiceAccount` exactly — this is how the operator recovers "which SA does this secret belong to" (e.g. to react to a rotated `tls.crt`), not by parsing the secret's own name.
 
 Deleting the `ServiceAccount` deletes its Keycloak client (the realm itself
 stays, since sibling SAs in the namespace may still use it — it's deleted
@@ -168,6 +173,7 @@ metadata:
   labels:
     myceliam.io/autoidp: "true"                    # required — the operator ignores everything else without this
     myceliam.io/client-type: "secret"               # "secret" | "signedjwt" (omit entirely for SPIFFE)
+    myceliam.io/oidc-provider: "keycloak"            # "keycloak" | "auth0" — optional when only one is active
     myceliam.io/aws-access-profile: "awsap-foo"      # name of an AwsAccessProfile in the same namespace
     myceliam.io/gcp-access-profile: "gcpap-foo"      # name of a GcpAccessProfile in the same namespace
   annotations:
@@ -205,27 +211,69 @@ split into multiple profiles if you need finer granularity per SA.
 
 For each `(profile, ServiceAccount)` pair, the operator:
 
-1. Creates a Keycloak client scope (`<cloud>-<namespace>-<sa>`, attached as
-   *optional* — a client only gets a scope's audience mapper in its token
-   when it explicitly requests it) carrying an Audience protocol mapper —
-   `aws-<namespace>-<sa>` for AWS, `gcp-<namespace>` for GCP (see
-   [Design principles](#design-principles) for why these differ).
-2. Registers the namespace's realm (or, for SPIFFE SAs, the SA's
+1. Grants the client access to an audience-scoped resource — the exact
+   mechanism and audience shape depend on the workload's `oidc-provider`:
+   Keycloak gets a per-`(cloud, SA)` client scope, attached as *optional* (a
+   client only gets a scope's audience mapper when it explicitly requests
+   it), carrying a unique `aws-<namespace>-<sa>` audience for AWS or a
+   namespace-shared `gcp-<namespace>` one for GCP (see
+   [Design principles](#design-principles) for why these differ). Auth0
+   instead gets one shared Resource Server (+ Client Grant) per
+   `(cloud, cluster, namespace)` — `<cloud>-<cluster-id>-<namespace>` —
+   since it has no equivalent to Keycloak's cheap per-client-scope
+   primitive; every SA in the namespace requesting that cloud shares the
+   same audience there, and the set of Client Grants (rather than the
+   audience itself) is what actually scopes access per SA.
+2. Registers the namespace's realm/tenant (or, for SPIFFE SAs, the SA's
    `spiffe-jwt-issuer`) as an IAM OIDC identity provider (AWS) / Workload
    Identity Pool+Provider (GCP) in every account/project the profile lists,
    with that audience in the provider's allowed list, and grants trust on
-   every role/service-account listed.
+   every role/service-account listed. The GCP Workload Identity provider is
+   itself scoped per `(cloud kind, oidc-provider)` too — a Keycloak-backed and
+   an Auth0-backed workload in the same namespace get *separate* WLI
+   providers (`<cluster>-<namespace>-keycloak`, `<cluster>-<namespace>-auth0`,
+   ...), each with its own issuer, rather than one shared provider whose
+   issuer would silently only ever match whichever provider last reconciled.
+
+Each listed role/service-account itself is expected to already exist —
+**except on AWS**, where a listed role that doesn't exist yet is created
+outright, with the web-identity trust statement as its entire initial trust
+policy (no permissions attached — see `cloudaws.EnsureRoleTrust`). This is
+AWS-only: GCP service accounts are never created by myceliam, only granted
+impersonation on ones a project owner already provisioned, since GCP has no
+equivalent "create a role that can trust something but do nothing yet"
+concept as cheaply as AWS's `iam:CreateRole` gives one.
 
 Tearing a `ServiceAccount` down (deletion, or its access-profile label being
-removed while `autoidp` stays `true`) always removes that SA's own scope and
-trust/impersonation grant immediately. Whether the shared IdP/provider
-resource itself also gets deleted depends on whether any *other*
+removed while `autoidp` stays `true`) always removes that SA's own scope/
+grant and trust/impersonation grant immediately. Whether the shared IdP/
+provider resource itself also gets deleted depends on whether any *other*
 non-SPIFFE `ServiceAccount` in the namespace still references the same
 profile — a sibling that's itself mid-deletion doesn't count as still
 referencing it, or no SA in a namespace could ever be the one to conclude
 it's safe to clean up. Deleting an `AwsAccessProfile`/`GcpAccessProfile` CR
 directly deregisters the provider in every account/project it listed;
-deleting the namespace cascades the same way.
+deleting the namespace cascades the same way — including a
+namespace-teardown-time fallback that force-deletes Auth0's two
+namespace-scoped Resource Servers outright, regardless of any individual
+SA's own cleanup history: unlike Keycloak's realm (one object whose deletion
+cascades everything under it), Auth0 has no such container, so relying
+solely on each SA being the one to notice "I'm the last reference" can leave
+a Resource Server orphaned if that per-SA cleanup ever doesn't run to
+completion (confirmed live).
+
+### Quick reference: what happens where
+
+What a Namespace event vs. a ServiceAccount event actually does on each
+external system:
+
+| Target | Namespace event | ServiceAccount event |
+|---|---|---|
+| **Keycloak** | Realm `<cluster-id>-<namespace>` created on that namespace's first SA reconcile; deleted (cascades everything under it) when the namespace is deleted. | Client created, `client_id` forced to the SA name. For cloud federation: a per-(cloud, SA) client scope + Audience mapper (`aws-<ns>-<sa>` / `gcp-<ns>`) created and attached optionally; removed when the SA or its profile label is removed. |
+| **Auth0** | No per-namespace tenant (one Auth0 tenant serves every namespace/cluster) — one shared Resource Server ("API"), `<cloud>-<cluster-id>-<namespace>`, created per cloud the first time any SA there requests it. On namespace deletion, both Resource Servers are force-deleted directly — no realm to cascade through. | Application created (Auth0 assigns its own opaque `client_id` — can't be pinned to the SA name). A Client Grant links it to the namespace's Resource Server audience. The one tenant-wide Action stamps `myceliam_service_account`/`_namespace`/`_cluster_id`/`_cloud` onto every token it issues — self-issued, since Auth0's real `azp` has no relation to the SA name. |
+| **AWS** | Maps to an IAM OIDC Provider per account, keyed by the workload provider's issuer URL — registered the first time any SA in the namespace federates into that account. | The SA's client-identifying value (Keycloak: SA name as `azp`; Auth0: its own Application client_id) is added to the provider's `ClientIDList`, and a `Sid`-tagged statement is added to each target role's trust policy (`aud`/identity-claim match; Auth0 also gets `aws:RequestTag`+`sts:TagSession`). If the role doesn't exist yet, it's created — trust policy only. Removed on SA/label removal; the role itself is never deleted. |
+| **GCP** | Maps to a Workload Identity Pool Provider per `(namespace, workload-provider)` — e.g. `<cluster>-<namespace>-keycloak`, `...-auth0` — so two different providers in the same namespace never collide on one issuer. | Granted `roles/iam.workloadIdentityUser` on each target GCP service account, scoped to its own principal (`google.subject`). Revoked immediately on SA/label removal; the provider itself is removed once no sibling SA still needs it. |
+| **SPIFFE** | Nothing created — SPIRE already issues the identity. | Nothing created either — only the SA's own `spiffe-jwt-issuer` gets registered as a trusted OIDC issuer on AWS/GCP, with the full SPIFFE ID as the trust condition's identity claim. |
 
 ## The operator's own identity
 
@@ -264,9 +312,10 @@ kubectl -n myceliam-system create secret tls myceliam-keycloak-keypair \
 
 For its own AWS/GCP credentials, the operator can instead skip Keycloak
 entirely and fetch its own SPIRE-issued JWT-SVID
-(`MYCELIAM_OPERATOR_IDENTITY_SOURCE=spiffe`) — a setting fully independent
-of `MYCELIAM_OIDC_PROVIDER`, which still governs how *workload* identities
-get provisioned. Two things have to exist first, and neither is something
+(`MYCELIAM_OPERATOR_PROVIDER=spiffe`) — a setting fully independent of
+which providers are active for *workload* identities (see "How it works"
+above for how those get provisioned per-ServiceAccount). Two things have
+to exist first, and neither is something
 the operator can set up for itself (same chicken-and-egg reasoning as its
 signed-JWT credential above):
 
@@ -282,6 +331,67 @@ signed-JWT credential above):
 See the commented-out block in `deploy/deployment.yaml` for the exact env
 vars and CSI volume mount this needs.
 
+When Auth0 is active (`MYCELIAM_AUTH0_DOMAIN` set), the operator's own credential
+(`myceliam-auth0-secret`/`myceliam-auth0-keypair` — same secret-or-keypair
+auto-detection as Keycloak's) plays both roles, same as Keycloak: it calls
+the Management API to provision workload Applications/Resource Servers/
+Client Grants/Actions, *and* it can be exchanged for the
+operator's own AWS/GCP credentials too. These are two separate audiences on
+the same Auth0 Application, not two credentials: Management API calls always
+target Auth0's fixed, reserved `https://{domain}/api/v2/` audience, while the
+operator's own cloud-federation token targets `MYCELIAM_AUTH0_OPERATOR_AUDIENCE`
+— a Resource Server the operator provisions for itself the first time it's
+needed (`Provider.ensureOperatorAccessScope`), the same way it provisions one
+per workload namespace via `EnsureAccessScope`. Nothing to pre-create in the
+Auth0 dashboard: just pick a unique identifier string and configure the same
+value on whatever pre-existing AWS IAM OIDC IdP/GCP WLI provider is meant to
+trust the operator's own bootstrap identity — same requirement
+`MYCELIAM_KEYCLOAK_OPERATOR_SCOPE` and `MYCELIAM_OPERATOR_SPIFFE_AUDIENCE`
+already have for their own paths. `MYCELIAM_OPERATOR_PROVIDER=spiffe`
+remains available if you'd rather keep the operator's own cloud-federation
+identity on SPIRE instead.
+
+**AWS-specific gotcha when manually configuring that pre-existing bootstrap
+trust** (confirmed empirically, cost significant debugging time to track
+down): AWS's `AssumeRoleWithWebIdentity` validates the IAM OIDC provider's
+`ClientIDList` against the token's `azp` claim, not its `aud` claim, whenever
+`azp` is present — Auth0 (and Keycloak) tokens always carry `azp`, set to the
+raw client_id. `internal/cloudproviders/aws`'s `EnsureIdp` already adds both
+the audience and the client_id for *workload* federation (see its package
+doc comment) — belt-and-suspenders, since only the client_id membership
+actually matters — but the operator's own bootstrap AWS IdP is
+admin-provisioned and myceliam never touches it, so when creating it by
+hand, `ClientIDList` only needs the raw client_id (e.g.
+`KPT1QUa3GPryMTPWvKNMKMECH0cxS4z0`); the literal audience string requested
+(`MYCELIAM_AUTH0_OPERATOR_AUDIENCE`'s value, `sts.amazonaws.com`, or
+anything else) does not need to be present at all, and its presence or
+absence changes nothing. The role's trust-policy `Condition` only needs the
+client_id too. Missing it produces a generic `InvalidIdentityToken` with no
+indication of why — everything else (signature, issuer, thumbprint) can be
+perfectly correct and it'll still fail. A second, unrelated, also-required
+detail: the IdP's `Url` must be registered WITH a trailing slash
+(`https://{domain}/`, matching Auth0's own `iss` claim exactly) — AWS does
+not normalize this itself.
+
+**Security consequence of AWS keying off `azp` rather than `aud`, combined
+with using one Auth0 Application for both the operator's Management API
+access and its cloud-federation identity** (the default here, matching
+Keycloak's own `KeycloakClientID`/`KeycloakOperatorScope` precedent): since
+`azp` is the same for every token this client mints regardless of which
+audience was actually requested, its Management API token — a highly
+privileged Auth0 tenant-administration credential — is just as valid for
+`AssumeRoleWithWebIdentity` as its intended cloud-federation token; AWS
+cannot tell them apart. The two credentials are therefore not independently
+revocable: compromising one structurally compromises both. This is an
+accepted tradeoff, not an oversight — only the operator pod ever holds this
+credential (gated by the `myceliam-auth0-keypair`/`-secret` Secret and RBAC
+already), and compromising it already means full Auth0 tenant admin access
+regardless of AWS, so the added blast radius is bounded rather than new.
+Independent revocability would require a code change (a second client
+id/credential setting — today's `auth0.Provider` always builds both its
+Management API and cloud-federation token sources from the same
+`MYCELIAM_AUTH0_OPERATOR_CLIENT_ID`), not just a deployment-config change.
+
 ## Deploying
 
 ```bash
@@ -292,7 +402,9 @@ kubectl apply -f deploy/rbac.yaml
 Then create one of the two Secrets described above, and apply
 `deploy/deployment.yaml` after filling in its placeholders
 (`MYCELIAM_CLUSTER_ID`, `MYCELIAM_KEYCLOAK_URL`, GCP bootstrap values) — or
-copy it as a starting point for your own cluster-specific version.
+copy it as a starting point for your own cluster-specific version. If you do,
+keep its `strategy: {type: Recreate}` — see Known limitations for why a
+single-instance operator needs it.
 
 ## Configuration reference
 
@@ -303,25 +415,27 @@ default:
 | Variable | Notes |
 |---|---|
 | `MYCELIAM_CLUSTER_ID` | Must be unique across every cluster sharing the same Keycloak/AWS/GCP backends — see [Design principles](#design-principles). |
-| `MYCELIAM_KEYCLOAK_URL` | Required when `MYCELIAM_OIDC_PROVIDER=keycloak` (the default). |
+| `MYCELIAM_KEYCLOAK_URL` | Set this to make Keycloak one of the active workload providers (see "How it works" above). At least one of `MYCELIAM_KEYCLOAK_URL` / (`MYCELIAM_AUTH0_DOMAIN` + `MYCELIAM_AUTH0_OPERATOR_CLIENT_ID`) must be set unless every workload is `clienttype=spiffe`. |
 
 Everything else has a default:
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `MYCELIAM_OIDC_PROVIDER` | `keycloak` | `keycloak` \| `okta` (scaffolded, not usable yet) \| `auth0` (not implemented) \| `none` (SPIFFE-only deployments, no Keycloak/Okta/Auth0 dependency at all) |
 | `MYCELIAM_KEYCLOAK_ADMIN_REALM` | `master` | Realm the operator's own Keycloak client lives in |
 | `MYCELIAM_KEYCLOAK_CLIENT_ID` | `myceliam-operator` | Identifies the operator's own Keycloak client (not a secret) |
 | `MYCELIAM_KEYCLOAK_VERIFY_SSL` | `true` | Set `false` only for self-signed/local test Keycloak instances |
 | `MYCELIAM_KEYCLOAK_ADMIN_SIGNEDJWT_ASSERTION_LIFETIME_SECONDS` | `60` | Validity window of each freshly-signed client assertion; only relevant when using `myceliam-keycloak-keypair` |
+| `MYCELIAM_AUTH0_DOMAIN` | _(none)_ | Set this (with `MYCELIAM_AUTH0_OPERATOR_CLIENT_ID`) to make Auth0 one of the active workload providers — the pre-existing Auth0 tenant's domain (e.g. `your-tenant.us.auth0.com`). The tenant itself is never created/managed by the operator |
+| `MYCELIAM_AUTH0_OPERATOR_CLIENT_ID` | _(none)_ | Required alongside `MYCELIAM_AUTH0_DOMAIN` to activate Auth0 — identifies the operator's own Auth0 Application used to call the Management API (not a secret, same reasoning as `MYCELIAM_KEYCLOAK_CLIENT_ID`) |
+| `MYCELIAM_AUTH0_OPERATOR_KEYPAIR_KID` | _(none)_ | Only required when using `myceliam-auth0-keypair` — unlike Keycloak's single-certificate mode, Auth0 assigns its own `kid` to an uploaded credential, which the operator can't derive or look up itself before authenticating |
+| `MYCELIAM_AUTH0_OPERATOR_AUDIENCE` | _(none)_ | Required to use Auth0 for the operator's own AWS/GCP cloud-federation token (i.e. whenever `MYCELIAM_OPERATOR_PROVIDER=auth0`) — the Resource Server identifier the operator provisions for itself on first use; see [The operator's own identity](#the-operators-own-identity) |
 | `MYCELIAM_SYSTEM_NAMESPACE` | `myceliam-system` | Where the operator looks for its own credential Secrets |
-| `MYCELIAM_CREDENTIALS_SECRET_SUFFIX` | `-oidc-credentials` | Suffix for the `<sa-name>{suffix}` Secret the operator writes workload credentials to |
 | `MYCELIAM_SIGNEDJWT_KEY_SIZE` | `2048` | RSA key size when generating a `clienttype=signedjwt` workload's keypair |
 | `MYCELIAM_SIGNEDJWT_CERT_VALIDITY_DAYS` | `365` | Self-signed cert validity for the same |
 | `MYCELIAM_RECONCILE_INTERVAL_SECONDS` | `300` | Periodic full-resync interval |
 | `MYCELIAM_KEYCLOAK_OPERATOR_SCOPE` | *(empty)* | Optional client scope requested only for the operator's own cloud-federation token — needed if your Keycloak client requires an explicit scope to pull in AWS/GCP audience mappers |
-| `MYCELIAM_OPERATOR_IDENTITY_SOURCE` | `keycloak` | `keycloak` \| `spiffe` — see [The operator's own identity](#the-operators-own-identity) |
-| `MYCELIAM_OPERATOR_SPIFFE_AUDIENCE` | *(empty)* | Required when `OPERATOR_IDENTITY_SOURCE=spiffe` — must match the bootstrap AWS IdP/GCP WLI provider's configured audience |
+| `MYCELIAM_OPERATOR_PROVIDER` | _(auto)_ | `keycloak` \| `auth0` \| `spiffe` — which identity the operator itself uses for its own AWS/GCP bootstrap credentials, decoupled from which provider(s) are active for workloads. Auto-resolves to the sole active workload provider when exactly one is active, or to `spiffe` when none are; must be set explicitly when more than one provider is active. See [The operator's own identity](#the-operators-own-identity) |
+| `MYCELIAM_OPERATOR_SPIFFE_AUDIENCE` | *(empty)* | Required when `MYCELIAM_OPERATOR_PROVIDER=spiffe` — must match the bootstrap AWS IdP/GCP WLI provider's configured audience |
 | `MYCELIAM_AWS_OPERATOR_ROLE_NAME` | `myceliam-operator` | Role name the operator assumes in every target AWS account (must be pre-provisioned per account) |
 | `MYCELIAM_AWS_OPERATOR_SESSION_NAME` | `myceliam-operator` | `RoleSessionName` on that same call — visible in CloudTrail |
 | `MYCELIAM_GCP_OPERATOR_STS_AUDIENCE` | *(empty)* | Full resource name of the bootstrap GCP WLI provider the operator itself federates through — required for GCP support |
@@ -351,9 +465,12 @@ smoke test and as a reference for writing your own client:
 
 ## Known limitations
 
-- **Registration only.** myceliam creates the AWS IAM OIDC provider / GCP
-  Workload Identity provider, never the IAM Role or IAM policy binding that
-  actually grants permissions once federated — see
+- **Registration and trust, not authorization.** myceliam creates the AWS
+  IAM OIDC provider / GCP Workload Identity provider, and — AWS only — will
+  create a referenced IAM Role if it doesn't already exist (trust policy
+  only, no permissions attached). It never creates a GCP service account,
+  and never attaches or implies the IAM/GCP policy binding that actually
+  grants permissions once federated on either cloud — see
   [Design principles](#design-principles).
 - **AWS trust-policy documents have a hard 2048-character cap that AWS
   itself won't raise.** A role referenced by many namespaces/SAs over time
@@ -366,23 +483,89 @@ smoke test and as a reference for writing your own client:
   `signedjwt` workload keypairs — rotation only happens if you edit
   `tls.crt` yourself (or a tool like cert-manager does), which the operator
   then picks up and re-uploads on its next reconcile.
-- **Okta is scaffolded, not implemented** (`internal/oidc/okta/`) — every
-  method returns `NotImplementedError`-equivalent. **Auth0 isn't implemented
-  at all.**
 - **A multi-value `aud` claim needs an `azp` claim, or AWS rejects the token
   outright.** Keycloak always provides one; SPIFFE JWT-SVIDs never do. This
   is an AWS behavior, not a myceliam bug, but it shapes how a
   SPIFFE-identified app has to fetch its tokens — see the demo apps above.
+  More precisely (confirmed empirically): AWS's `AssumeRoleWithWebIdentity`
+  checks the token's `azp` claim against the IAM OIDC provider's
+  `ClientIDList` whenever `azp` is present, and never even looks at `aud` in
+  that case — it only falls back to checking `aud` directly (and enforcing
+  that restriction on multi-valued `aud`) when `azp` is absent. One rule
+  explains both halves of this bullet, not two separate behaviors.
+  **The same `azp`-over-`aud` substitution also applies inside a role's own
+  trust-policy `Condition` block** — its `:aud` policy-context key resolves
+  to `azp`'s value whenever the token carries one, confirmed live to happen
+  *unconditionally*, not only for the multi-valued-`aud` case above (an
+  Auth0-issued token with a clean single-string `aud` still had `azp`
+  substituted in). Auth0's `azp` is its own dynamically-assigned client_id —
+  unrelated to both the configured audience and to
+  `myceliam_service_account` — so `cloudaws.EnsureRoleTrust` writes an
+  OR-match (`ForAnyValue:StringEquals`) against both the configured audience
+  and that client_id, rather than assuming either shape upfront; the same
+  claim used to prove *identity* (`myceliam_service_account`, or `azp` for
+  Keycloak) is still required as a separate, mandatory condition
+  alongside it — this only widens which literal value `:aud` is allowed to
+  be, it doesn't weaken who's allowed to assume the role.
+- **AWS cannot use Auth0's (or any provider's) custom/dynamically-injected
+  claims directly in IAM role trust-policy conditions — only native OIDC
+  claims (`iss`, `sub`, `aud`/`azp`) are usable there.** Confirmed
+  empirically: a `StringEquals` condition on
+  `<provider>:myceliam_service_account` never matches, even when the claim
+  is genuinely present with the exact expected value in the JWT (`:sub` and
+  `:aud` conditions against the same token work fine side by side). Best
+  explanation: AWS likely only exposes claims declared in the provider's own
+  OIDC discovery document (`claims_supported`), which — unlike
+  `sub`/`aud`/`iss` — never lists a claim injected at runtime by an Auth0
+  Action.
+  **myceliam works around this automatically today** via AWS's
+  [session-tags-via-`AssumeRoleWithWebIdentity`
+  feature](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html#id_session-tags_adding-assume-role-idp)
+  (confirmed live end to end, including a `Deny` keyed on the tag actually
+  blocking an otherwise broadly-permitted call): the same tenant-wide Auth0
+  Action that sets `myceliam_service_account` also sets a claim named exactly
+  `https://aws.amazon.com/tags`, shaped as `{"principal_tags":
+  {"myceliam_service_account": ["sa1"], "myceliam_namespace": ["ns1"],
+  "myceliam_cluster_id": ["id1"], "myceliam_cloud": ["gcp,aws"]}}` (each
+  array must hold exactly one string — a genuine multi-element array makes
+  AWS reject the whole token outright with `InvalidIdentityToken`, confirmed
+  live, no index selection or graceful degradation). Whenever
+  `cloudaws.EnsureRoleTrust` is handling a provider whose identity claim
+  needs this detour (`cloudmodels.CloudFederationSpec.SubjectClaimViaSessionTag`
+  — Auth0 today), it automatically writes
+  `aws:RequestTag/myceliam_service_account` (rather than the
+  non-working `<issuer>:myceliam_service_account` form) directly in the
+  trust policy's own `Condition` block — gating the
+  `AssumeRoleWithWebIdentity` call itself, confirmed live both ways: a
+  matching value succeeds, a mismatched value fails outright with
+  `AccessDenied` — and grants the required `sts:TagSession` action alongside
+  `sts:AssumeRoleWithWebIdentity`. This restores real per-SA discrimination
+  for AWS despite one shared Auth0 Application per namespace, with no manual
+  trust-policy authoring needed at all — `cloudaws.EnsureRoleTrust` creates
+  the role itself (trust policy only, no permissions attached) if it doesn't
+  already exist yet; myceliam still never attaches or implies a permissions
+  policy on it — see [Design principles](#design-principles).
 - **SPIFFE support assumes you've already stood up SPIRE** (server, agents,
   `spire-controller-manager`, `spiffe-csi-driver`) — myceliam only consumes
   an existing JWT-SVID issuer, it doesn't provision SPIRE itself.
+- **The operator must run as a single instance at all times, even during a
+  rolling deploy.** `cmd/main.go` deliberately runs with no leader election
+  (matching kopf's `--standalone` mode), which is safe with `replicas: 1` —
+  *except* Kubernetes' default Deployment strategy (`RollingUpdate`) starts
+  the new pod before stopping the old one, so any redeploy briefly runs two
+  uncoordinated operator processes reconciling the same objects at once.
+  Confirmed live: this raced Auth0's `ensureApp` find-then-create check,
+  producing two duplicate Applications for the same ServiceAccount. Every
+  manifest under `deploy/`/`deploy-operator/` now sets
+  `strategy: {type: Recreate}` to close this — if you're maintaining your own
+  copy of the Deployment instead, make sure it does too.
 
 ## Where this is headed
 
-Everything above describes what's implemented today: two identity sources
-in (Keycloak, SPIRE), two clouds out (AWS, GCP), with access expressed
-entirely through `AwsAccessProfile`/`GcpAccessProfile`. The point of the
-project, though, is broader than either pairing: myceliam is meant to be an
+Everything above describes what's implemented today: three identity sources
+in (Keycloak, Auth0, SPIRE), two clouds out (AWS, GCP), with access
+expressed entirely through `AwsAccessProfile`/`GcpAccessProfile`. The point
+of the project, though, is broader than either pairing: myceliam is meant to be an
 **orchestrator** — a plug-in point where identity providers on one side and
 cloud providers on the other can each grow independently, without either
 side having to know about the other. myceliam doesn't issue or replace a
@@ -422,20 +605,17 @@ SPIFFE JWT-SVID
 ```
 
 Identity providers already share one interface (`oidc.Provider`) that
-Keycloak and Okta's scaffold both implement — adding a new one is writing a
-new implementation, not restructuring what's there. Cloud providers are
-parallel packages today (`internal/cloudproviders/aws`,
-`internal/cloudproviders/gcp`) rather than a currently-unified interface;
-tightening that into the same kind of pluggable shape as the identity side
-is part of the work ahead of adding a third.
+Keycloak and Auth0 both implement — adding a new one is writing a new
+implementation, not restructuring what's there. Cloud providers are parallel
+packages today (`internal/cloudproviders/aws`, `internal/cloudproviders/gcp`)
+rather than a currently-unified interface; tightening that into the same
+kind of pluggable shape as the identity side is part of the work ahead of
+adding a third.
 
 Concretely, on the roadmap:
 
 - **Cloud providers**: Azure and Oracle Cloud Infrastructure (OCI),
   alongside AWS/GCP already implemented.
-- **Identity providers**: finishing Okta (scaffolded in
-  `internal/oidc/okta/`, not yet usable — every method is a stub today) and
-  adding Auth0, alongside Keycloak/SPIFFE already implemented.
 
 Neither list changes the shape of what's here already — `AwsAccessProfile`/
 `GcpAccessProfile`-style CRDs stay the interface, `ServiceAccount` labels

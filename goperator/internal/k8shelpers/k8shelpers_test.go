@@ -122,7 +122,8 @@ func TestCreateTLSSecretIfAbsentCreates(t *testing.T) {
 	c := newFakeClient(t)
 	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "ServiceAccount", Name: "my-app", UID: "uid-1"}
 
-	err := CreateTLSSecretIfAbsent(context.Background(), c, "default", "my-app-oidc-credentials", []byte("cert"), []byte("key"), owner)
+	err := CreateTLSSecretIfAbsent(context.Background(), c, "default", "my-app-oidc-credentials", []byte("cert"), []byte("key"),
+		map[string]string{"myceliam.io/service-account": "my-app"}, owner)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -133,6 +134,9 @@ func TestCreateTLSSecretIfAbsentCreates(t *testing.T) {
 	}
 	if secret.Type != corev1.SecretTypeTLS || string(secret.Data["tls.crt"]) != "cert" {
 		t.Fatalf("unexpected secret: %+v", secret)
+	}
+	if secret.Annotations["myceliam.io/service-account"] != "my-app" {
+		t.Fatalf("expected service-account annotation, got %+v", secret.Annotations)
 	}
 }
 
@@ -145,7 +149,8 @@ func TestCreateTLSSecretIfAbsentNoopsOnExisting(t *testing.T) {
 	c := newFakeClient(t, existing)
 	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "ServiceAccount", Name: "my-app", UID: "uid-1"}
 
-	err := CreateTLSSecretIfAbsent(context.Background(), c, "default", "my-app-oidc-credentials", []byte("generated"), []byte("key"), owner)
+	err := CreateTLSSecretIfAbsent(context.Background(), c, "default", "my-app-oidc-credentials", []byte("generated"), []byte("key"),
+		map[string]string{"myceliam.io/service-account": "my-app"}, owner)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -164,7 +169,8 @@ func TestWriteCredentialsSecretCreatesWhenAbsent(t *testing.T) {
 	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "ServiceAccount", Name: "my-app", UID: "uid-1"}
 
 	err := WriteCredentialsSecret(context.Background(), c, "default", "my-app-oidc-credentials",
-		map[string]string{"client_id": "my-app", "client_secret": "s3cr3t"}, owner)
+		map[string]string{"client_id": "my-app", "client_secret": "s3cr3t"},
+		map[string]string{"myceliam.io/service-account": "my-app"}, owner)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -175,6 +181,9 @@ func TestWriteCredentialsSecretCreatesWhenAbsent(t *testing.T) {
 	}
 	if string(secret.Data["client_secret"]) != "s3cr3t" {
 		t.Fatalf("unexpected secret: %+v", secret)
+	}
+	if secret.Annotations["myceliam.io/service-account"] != "my-app" {
+		t.Fatalf("expected service-account annotation, got %+v", secret.Annotations)
 	}
 }
 
@@ -188,7 +197,8 @@ func TestWriteCredentialsSecretUpdatesWhenPresent(t *testing.T) {
 	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "ServiceAccount", Name: "my-app", UID: "uid-1"}
 
 	err := WriteCredentialsSecret(context.Background(), c, "default", "my-app-oidc-credentials",
-		map[string]string{"client_secret": "new-secret"}, owner)
+		map[string]string{"client_secret": "new-secret"},
+		map[string]string{"myceliam.io/service-account": "my-app"}, owner)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -199,5 +209,8 @@ func TestWriteCredentialsSecretUpdatesWhenPresent(t *testing.T) {
 	}
 	if string(secret.Data["client_secret"]) != "new-secret" {
 		t.Fatalf("expected updated secret, got %q", secret.Data["client_secret"])
+	}
+	if secret.Annotations["myceliam.io/service-account"] != "my-app" {
+		t.Fatalf("expected service-account annotation on update too, got %+v", secret.Annotations)
 	}
 }

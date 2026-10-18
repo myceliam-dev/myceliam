@@ -1,0 +1,298 @@
+---
+# combined-operator.yaml — one template Deployment covering every mix of
+# active providers, controlled purely by which of the three blocks below
+# (KEYCLOAK, AUTH0, SPIFFE) are present. See internal/config/config.go's
+# ActiveProviders()/validateProviderConfig() for the authoritative rules this
+# file follows:
+#   - Keycloak is an active workload provider iff MYCELIAM_KEYCLOAK_URL is set
+#     to a non-empty value.
+#   - Auth0 is an active workload provider iff BOTH MYCELIAM_AUTH0_DOMAIN and
+#     MYCELIAM_AUTH0_OPERATOR_CLIENT_ID are set to non-empty values.
+#   - An env var that is entirely omitted and one whose value is "" are
+#     treated identically — config.Load() uses os.LookupEnv, and every
+#     optional field here already defaults to "" when unset, so deleting the
+#     `- name:` entry or leaving `value: ""` behave exactly the same way.
+#   - MYCELIAM_OPERATOR_PROVIDER picks which identity the OPERATOR ITSELF
+#     uses for its own AWS/GCP bootstrap credentials — independent of which
+#     provider(s) are active for workloads above. It must be "spiffe" or the
+#     name of an active provider. Left unset, it auto-resolves to the sole
+#     active provider when exactly one is active, or to "spiffe" when none
+#     are; with two or more active it MUST be set explicitly.
+#
+# Five supported combinations, and exactly what to do to each block/var below
+# for each:
+#
+#   a) Auth0 + SPIFFE          — keep AUTH0 block, keep SPIFFE block, delete
+#                                 KEYCLOAK block. MYCELIAM_OPERATOR_PROVIDER:
+#                                 "auth0" or "spiffe" (or omitted — auto-
+#                                 resolves to "auth0", the sole active
+#                                 provider).
+#   b) Keycloak + SPIFFE       — keep KEYCLOAK block, keep SPIFFE block,
+#                                 delete AUTH0 block. MYCELIAM_OPERATOR_PROVIDER:
+#                                 "keycloak" or "spiffe" (or omitted — auto-
+#                                 resolves to "keycloak").
+#   c) Auth0 + Keycloak + SPIFFE — keep all three blocks.
+#                                 MYCELIAM_OPERATOR_PROVIDER is REQUIRED
+#                                 (two active workload providers): "auth0",
+#                                 "keycloak", or "spiffe".
+#   d) Auth0 + Keycloak (no SPIFFE) — keep KEYCLOAK and AUTH0 blocks, delete
+#                                 the entire SPIFFE block (env vars AND the
+#                                 volumeMounts/volumes — no SPIRE socket
+#                                 needed at all). MYCELIAM_OPERATOR_PROVIDER
+#                                 is REQUIRED: "auth0" or "keycloak".
+#   e) SPIFFE only              — delete both KEYCLOAK and AUTH0 blocks, keep
+#                                 SPIFFE block. MYCELIAM_OPERATOR_PROVIDER:
+#                                 "spiffe" (or omitted — with zero active
+#                                 workload providers it auto-resolves to
+#                                 "spiffe" anyway).
+#
+# ==========================================================================
+# The rest of this comment documents the AUTH0 block specifically — see
+# ../keycloak/keycloak-operator.yaml and ../spiffe/spiffe-operator.yaml for
+# the equivalent per-block background on Keycloak and SPIFFE.
+# ==========================================================================
+#
+# internal/oidc/auth0.Provider.GetOperatorToken is implemented: the operator
+# can use Auth0 for BOTH its Management API access (creating workload
+# Applications/Resource-Servers/Client-Grants/Actions — see
+# auth0-client-secret.yaml / auth0-tls-secret.yaml) AND its own AWS/GCP
+# cloud-federation identity, the same way Keycloak's operator client can
+# serve both roles. These are still two logically separate things even
+# though they share one credential:
+#   - Management API access uses Auth0's reserved, built-in audience
+#     "https://{domain}/api/v2/" — nothing to configure beyond
+#     MYCELIAM_AUTH0_DOMAIN/MYCELIAM_AUTH0_OPERATOR_CLIENT_ID below.
+#   - The operator's own AWS/GCP federation token (when
+#     MYCELIAM_OPERATOR_PROVIDER=auth0) uses a SEPARATE audience,
+#     MYCELIAM_AUTH0_OPERATOR_AUDIENCE below — a Resource Server the operator
+#     provisions itself on first use (Provider.ensureOperatorAccessScope),
+#     the same way EnsureAccessScope provisions one per workload namespace.
+#     There's nothing to pre-create in the Auth0 dashboard for this: just
+#     pick a unique identifier string and put it in both
+#     MYCELIAM_AUTH0_OPERATOR_AUDIENCE here and whatever ClientIDList/
+#     allowedAudiences entry the pre-existing AWS IAM OIDC IdP / GCP
+#     Workload Identity Pool provider expects (same requirement
+#     MYCELIAM_KEYCLOAK_OPERATOR_SCOPE and MYCELIAM_OPERATOR_SPIFFE_AUDIENCE
+#     already have for their own paths).
+#
+# Both AWS and GCP confirmed working live against the exact credential/
+# audience this Deployment uses (STS/AssumeRoleWithWebIdentity and
+# STS-token-exchange-then-impersonate respectively, both returning real
+# credentials). MYCELIAM_AWS_OPERATOR_ROLE_NAME isn't set below because the
+# default ("myceliam-operator", see config.go) already matches the real role
+# tested against — set it explicitly if your role has a different name.
+#
+# IMPORTANT — AWS-side gotcha specific to the operator's own bootstrap IdP:
+# unlike the *workload* AWS IdP registration path (see
+# internal/cloudproviders/aws's package doc comment — EnsureIdp already
+# handles this automatically), the operator's own bootstrap AWS IAM OIDC
+# provider is admin-provisioned and myceliam never touches it. Confirmed
+# empirically: AWS's AssumeRoleWithWebIdentity validates ClientIDList against
+# the token's `azp` claim, NOT its `aud` claim, whenever azp is present —
+# Auth0 (and Keycloak) tokens always carry azp, set to the raw client_id.
+# ClientIDList only needs the raw client_id (e.g. "KPT1QUa3GPryMTPWvKNMKMECH0cxS4z0")
+# — the literal audience string requested (e.g. MYCELIAM_AUTH0_OPERATOR_AUDIENCE's
+# value, or "sts.amazonaws.com") does NOT need to be in ClientIDList at all,
+# and its presence changes nothing. Put the raw client_id in both
+# --client-id-list and the role's trust-policy Condition. A second,
+# unrelated, also-required quirk found alongside it: the IdP's Url must be
+# registered WITH a trailing slash (https://{domain}/, matching Auth0's own
+# `iss` claim exactly) — AWS does not normalize this itself, and without it
+# validation fails the same generic InvalidIdentityToken way even with
+# ClientIDList otherwise correct.
+#
+# SECURITY NOTE — a direct consequence of AWS keying off azp rather than aud,
+# combined with using one Auth0 Application for both roles: because azp is
+# the SAME for every token this client mints regardless of which audience
+# was actually requested, its Management API token (a highly privileged
+# Auth0 tenant-administration credential) is JUST AS VALID for
+# AssumeRoleWithWebIdentity as its intended cloud-federation token — AWS
+# cannot tell them apart. The Management API credential and the
+# AWS-federation credential are therefore not independently revocable:
+# compromising one structurally compromises both. This is an accepted
+# tradeoff here, not an oversight — only the operator pod ever holds this
+# credential (gated by the myceliam-auth0-keypair/-secret k8s Secret + RBAC
+# already), and compromising it already means full Auth0 tenant admin
+# access regardless of AWS, so the added blast radius is bounded rather than
+# a new attack surface from zero — matching Keycloak's own precedent
+# (KeycloakClientID/KeycloakOperatorScope already share one client the same
+# way). Note that today's Provider always builds both p.auth (Management
+# API) and p.operatorAuth (cloud-federation) from the same
+# MYCELIAM_AUTH0_OPERATOR_CLIENT_ID/credential (see New() in client.go) —
+# independent revocability would need a code change (a second client
+# id/credential setting), not just a different env var value here.
+#
+# The Management API scopes myceliam-operator's Auth0 Application needs for
+# this to actually work aren't just create:* (create:clients,
+# create:resource_servers, create:client_grants, create:actions,
+# create:client_credentials, ...) — every EnsureX helper in
+# internal/oidc/auth0 does a find-before-create (GET before POST), so
+# read:clients, read:resource_servers, read:client_grants, and read:actions
+# are required too, plus update:clients (client_metadata bookkeeping),
+# update:actions (keeping the deployed Action's code current — see
+# actions.go's ensureActionCodeCurrent), and delete:clients/
+# delete:resource_servers/delete:client_grants/delete:actions for teardown
+# paths. Grant these on the Auth0 Management API's own Machine to Machine
+# Applications tab for this client — NOT on any Custom API you've created:
+# a Custom API's scopes are a completely separate, unrelated namespace that
+# the Management API never reads from.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: myceliam-operator
+  namespace: myceliam-system
+spec:
+  replicas: 1
+  # The operator runs with no leader election (single-instance, matching
+  # kopf's --standalone mode) — Kubernetes' default RollingUpdate strategy
+  # briefly runs the old and new pod together on every redeploy, and two
+  # uncoordinated operator processes reconciling the same objects at once
+  # can race (confirmed live: produced two duplicate Auth0 Applications for
+  # the same ServiceAccount). Recreate guarantees the old pod fully stops
+  # before the new one starts.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: myceliam-operator
+  template:
+    metadata:
+      labels:
+        app: myceliam-operator
+    spec:
+      serviceAccountName: myceliam-operator
+      containers:
+        - name: operator
+          image: myceliam-operator:test
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MYCELIAM_CLUSTER_ID
+              value: "demo"
+
+            # ===== KEYCLOAK BLOCK — delete entirely for scenario (a) or (e) =====
+            # MYCELIAM_KEYCLOAK_URL being non-empty is what makes Keycloak an
+            # active workload provider — see ../keycloak/keycloak-operator.yaml
+            # for the full per-var explanation.
+            - name: MYCELIAM_KEYCLOAK_URL
+              value: "https://keycloak.sargamholdem.com/auth"
+            - name: MYCELIAM_KEYCLOAK_ADMIN_REALM
+              value: "master"
+            - name: MYCELIAM_KEYCLOAK_CLIENT_ID
+              value: "myceliam-operator-tls"
+            - name: MYCELIAM_KEYCLOAK_OPERATOR_SCOPE
+              value: "operator-aws operator-gcp"
+            # ===== END KEYCLOAK BLOCK =====
+
+            # ===== AUTH0 BLOCK — delete entirely for scenario (b) or (e) =====
+            # MYCELIAM_AUTH0_DOMAIN + MYCELIAM_AUTH0_OPERATOR_CLIENT_ID both
+            # non-empty is what makes Auth0 an active workload provider — see
+            # this file's header comment for the full explanation.
+            #
+            # The pre-existing Auth0 tenant's domain — the tenant itself, and
+            # the tenant-wide Action projecting
+            # cloudmodels.Auth0ServiceAccountClaim into issued tokens, are
+            # both admin-provisioned prerequisites the operator never creates
+            # (the Action IS auto-provisioned by EnsureTenant on first use,
+            # but the tenant itself, and the operator's own Application
+            # below, are not) — see internal/oidc/auth0's package doc comment.
+            - name: MYCELIAM_AUTH0_DOMAIN
+              value: "dev-ngyf2gzgiq5odql1.us.auth0.com"
+            # Identifies the operator's own Auth0 Application (Machine to
+            # Machine) — not a secret, just an identifier, same reasoning as
+            # MYCELIAM_KEYCLOAK_CLIENT_ID. This ONE Application is used both
+            # for Management API access and (via a separate audience, below)
+            # the operator's own AWS/GCP federation token, when
+            # MYCELIAM_OPERATOR_PROVIDER=auth0. The actual credential is
+            # never an env var: see auth0-client-secret.yaml /
+            # auth0-tls-secret.yaml.
+            - name: MYCELIAM_AUTH0_OPERATOR_CLIENT_ID
+              value: "KPT1QUa3GPryMTPWvKNMKMECH0cxS4z0"
+            # Required here: this deployment uses auth0-tls-secret.yaml
+            # (private_key_jwt), and Auth0 assigns its own kid to that
+            # credential (shown in the Auth0 dashboard), which the operator
+            # has no way to derive or look up itself.
+            - name: MYCELIAM_AUTH0_OPERATOR_KEYPAIR_KID
+              value: "pd4jacUz9XLp0v0YFNCBI4O8XeQn_g3oZ-soq1JhZX0"
+            # Only actually used when MYCELIAM_OPERATOR_PROVIDER=auth0 — the
+            # Resource Server identifier the operator requests for its OWN
+            # AWS/GCP cloud-federation token (see this file's header
+            # comment) — must match whatever ClientIDList/allowedAudiences
+            # entry the pre-existing AWS IAM OIDC IdP / GCP Workload Identity
+            # Pool provider expects. The operator provisions the matching
+            # Resource Server + its own Client Grant automatically on first
+            # use — nothing to pre-create in the Auth0 dashboard. This is the
+            # "master" Custom API identifier confirmed working for GCP.
+            - name: MYCELIAM_AUTH0_OPERATOR_AUDIENCE
+              value: "myceliam-operator"
+            # ===== END AUTH0 BLOCK =====
+
+            # Single shared AWS/GCP bootstrap config, used no matter which of
+            # auth0/keycloak/spiffe MYCELIAM_OPERATOR_PROVIDER ends up being
+            # below — this template does NOT support a separate IAM
+            # role/WLI provider per identity choice. If your setup needs
+            # that (e.g. distinct trust policies per identity, as
+            # ../spiffe/spiffe-operator.yaml's own comment discusses), split
+            # this back into per-provider files instead of using this
+            # combined template.
+            #
+            # Role the operator assumes in every target AWS account via
+            # AssumeRoleWithWebIdentity (must be pre-provisioned per account,
+            # with its trust policy accepting whichever identity/identities
+            # you intend to use here). Not set in the other per-provider
+            # deploy-operator/*/*.yaml templates because the default
+            # ("myceliam-operator", see config.go) already matches; spelled
+            # out explicitly here since this template is meant to be the
+            # single source of truth for the operator's AWS bootstrap
+            # regardless of provider.
+            - name: MYCELIAM_AWS_OPERATOR_ROLE_NAME
+              value: "myceliam-operator"
+            # Not secrets — same bootstrap hub-project WLI pool/provider and
+            # service account the local minikube cluster's operator already
+            # uses, since both share the same external GCP project. Only
+            # relevant for GCP IdP federation (myceliam.io/gcp-access-profile
+            # label); needed regardless of which provider ultimately backs
+            # the operator's own identity below.
+            - name: MYCELIAM_GCP_OPERATOR_STS_AUDIENCE
+              value: "//iam.googleapis.com/projects/315798566630/locations/global/workloadIdentityPools/myceliam-operator-admin/providers/myceliam-operator-auth0"
+            - name: MYCELIAM_GCP_OPERATOR_SERVICE_ACCOUNT_EMAIL
+              value: "operator@project-2f046078-45a1-49af-ac9.iam.gserviceaccount.com"
+
+            # Which identity the OPERATOR ITSELF uses for its own AWS/GCP
+            # bootstrap credentials — see this file's header comment for
+            # exactly when this must vs. may be omitted. Set to whichever of
+            # "auth0" / "keycloak" / "spiffe" applies to your scenario.
+            - name: MYCELIAM_OPERATOR_PROVIDER
+              value: "auth0"
+
+            # ===== SPIFFE BLOCK — delete entirely for scenario (d) =====
+            # Only read when MYCELIAM_OPERATOR_PROVIDER=spiffe above; the env
+            # vars are harmless to leave in place otherwise, but the
+            # volumeMounts/volumes at the bottom of this file (the actual
+            # SPIRE agent socket) should come out too for scenario (d) since
+            # nothing needs it.
+            - name: MYCELIAM_OPERATOR_SPIFFE_AUDIENCE
+              value: "myceliam-operator"
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///spiffe-workload-api/spire-agent.sock"
+            # ===== END SPIFFE BLOCK (env vars) =====
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          # ===== SPIFFE BLOCK (volume mount) — remove together with the
+          # SPIFFE env vars above for scenario (d) =====
+          volumeMounts:
+            - name: spiffe-workload-api
+              mountPath: /spiffe-workload-api
+              readOnly: true
+          # ===== END SPIFFE BLOCK (volume mount) =====
+      # ===== SPIFFE BLOCK (volume) — remove together with the rest of the
+      # SPIFFE block for scenario (d) =====
+      volumes:
+        - name: spiffe-workload-api
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+      # ===== END SPIFFE BLOCK (volume) =====

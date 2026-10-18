@@ -37,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"myceliam/internal/cloudmodels"
 	"myceliam/internal/config"
 	"myceliam/internal/httpx"
 	"myceliam/internal/oidc"
@@ -88,11 +89,37 @@ var kindConfigs = map[string]kindConfig{
 // never collide on the same provider ID just because they happen to have a
 // namespace with the same name (see config.Settings.ClusterID's own doc
 // comment). WLI provider IDs must be 4-32 chars of lowercase letters/digits/
-// hyphens. Room for the "-<kind>" suffix is reserved before truncating the
-// cluster+namespace-derived base, so oidc/spiffe providers for the same
-// (long) cluster/namespace never collide on one truncated ID.
-func providerID(namespace, kind string, settings *config.Settings) string {
+// hyphens.
+//
+// For KindOIDC, the suffix is "-<workloadProvider>" (e.g. "-keycloak",
+// "-auth0"), not a generic "-oidc" — confirmed live as a real bug: a single
+// shared "<cluster>-<namespace>-oidc" provider across every OIDC-backed
+// workload in a namespace means whichever provider (Keycloak vs Auth0)
+// reconciled LAST silently overwrote the others' issuerUri/
+// attributeMapping, so any workload using a different provider than
+// whichever won that race got an issuer mismatch (invalid_grant) at STS
+// exchange time. One provider per (namespace, workloadProvider) fixes this;
+// KindSpiffe keeps its own single "-spiffe" suffix unconditionally, since
+// SPIFFE identity is independent of which OIDC provider(s) happen to be
+// active (see reconcile.go's SPIFFE paths, which always resolve an empty
+// workload-provider name).
+//
+// Room for the suffix is reserved before truncating the cluster+namespace-
+// derived base, so providers for the same (long) cluster/namespace never
+// collide on one truncated ID — this already handles suffixes of any length
+// generically, so keycloak's longer "-keycloak" suffix needs no separate
+// case.
+//
+// MIGRATION NOTE: this renames existing "<cluster>-<namespace>-oidc"
+// providers to "<cluster>-<namespace>-<workloadProvider>" — a deployment
+// upgrading past this change will get fresh providers created under the new
+// names, and the old "-oidc" ones become orphaned (harmless, but not
+// auto-cleaned; delete them manually in the GCP console/CLI if desired).
+func providerID(namespace, kind, workloadProvider string, settings *config.Settings) string {
 	suffix := "-" + kind
+	if kind == KindOIDC && workloadProvider != "" {
+		suffix = "-" + workloadProvider
+	}
 	base := settings.ClusterID + "-" + namespace
 	if maxBaseLen := 32 - len(suffix); len(base) > maxBaseLen {
 		base = base[:maxBaseLen]
@@ -155,25 +182,63 @@ func raiseForStatus(resp *apiResponse, action string) error {
 	return nil
 }
 
-func fetchJWKS(ctx context.Context, issuerURL string, settings *config.Settings) (string, error) {
-	client := httpx.NewClient(settings.KeycloakVerifySSL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(issuerURL, "/")+"/protocol/openid-connect/certs", nil)
+// fetchJWKS resolves issuerURL's JWKS via standard OIDC discovery
+// (<issuer>/.well-known/openid-configuration -> jwks_uri -> the actual JWKS
+// document) rather than a hardcoded path. Confirmed live this session as a
+// real bug: this used to hardcode Keycloak's own path
+// (/protocol/openid-connect/certs), which 404s against Auth0 (whose JWKS
+// lives at /.well-known/jwks.json) — discovery works uniformly across both,
+// since it's part of the OIDC spec each implements. verifySSL is only
+// skipped for Keycloak (Settings.KeycloakVerifySSL, for self-signed/local
+// test instances) — Auth0 is always a genuine public HTTPS endpoint with a
+// valid cert.
+func fetchJWKS(ctx context.Context, issuerURL string, settings *config.Settings, workloadProvider string) (string, error) {
+	verifySSL := true
+	if workloadProvider == "keycloak" {
+		verifySSL = settings.KeycloakVerifySSL
+	}
+	client := httpx.NewClient(verifySSL)
+
+	discoveryURL := strings.TrimRight(issuerURL, "/") + "/.well-known/openid-configuration"
+	body, err := fetchURL(ctx, client, discoveryURL)
 	if err != nil {
 		return "", err
 	}
+	var discovery struct {
+		JWKSURI string `json:"jwks_uri"`
+	}
+	if err := json.Unmarshal(body, &discovery); err != nil {
+		return "", fmt.Errorf("decoding OIDC discovery document from %s: %w", discoveryURL, err)
+	}
+	if discovery.JWKSURI == "" {
+		return "", operr.Temporaryf(idpCallDelay, "OIDC discovery document at %s has no jwks_uri", discoveryURL)
+	}
+
+	jwksBody, err := fetchURL(ctx, client, discovery.JWKSURI)
+	if err != nil {
+		return "", err
+	}
+	return string(jwksBody), nil
+}
+
+func fetchURL(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", operr.Temporaryf(idpCallDelay, "Error fetching JWKS from %s: %v", issuerURL, err)
+		return nil, operr.Temporaryf(idpCallDelay, "Error fetching %s: %v", url, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if resp.StatusCode >= 400 {
-		return "", operr.Temporaryf(idpCallDelay, "Error fetching JWKS from %s: %d %s", issuerURL, resp.StatusCode, string(body))
+		return nil, operr.Temporaryf(idpCallDelay, "Error fetching %s: %d %s", url, resp.StatusCode, string(body))
 	}
-	return string(body), nil
+	return body, nil
 }
 
 // undelete requests GCP to undelete a soft-deleted WLI pool/provider. This is
@@ -245,14 +310,27 @@ func EnsurePool(ctx context.Context, projectID string, settings *config.Settings
 // itself already exists — that's EnsurePool's job, triggered separately off
 // GcpAccessProfile reconciliation. kind picks which per-kind convention from
 // kindConfigs (JWKS embedding, subject-claim mapping) applies — see package doc.
-func EnsureIdp(ctx context.Context, projectID, namespace, issuerURL, audience string, settings *config.Settings, kind string, oidcProvider oidc.Provider) error {
+// workloadProvider is the resolved OIDC provider name (keycloak/auth0)
+// the reconciling ServiceAccount actually uses — only consulted when
+// kind==KindOIDC, to pick the right subject-claim convention for the WLI
+// provider's attribute mapping; ignored for KindSpiffe (pass ""). Distinct
+// from oidcProvider below, which is always the operator's OWN identity
+// (Deps.OperatorOIDC), used only to obtain the operator's own GCP access
+// token to make these API calls — never the workload's provider.
+func EnsureIdp(ctx context.Context, projectID, namespace, issuerURL, audience string, settings *config.Settings, kind, workloadProvider string, oidcProvider oidc.Provider) error {
 	kc := kindConfigs[kind]
+	if kind == KindOIDC {
+		// kindConfigs' "azp" default is Keycloak's convention — see
+		// cloudmodels.OidcSubjectClaim's doc comment for Auth0's own
+		// convention.
+		kc.subjectClaim = cloudmodels.OidcSubjectClaim(workloadProvider)
+	}
 	accessToken, err := getGCPAccessToken(ctx, settings, oidcProvider)
 	if err != nil {
 		return err
 	}
 	poolName := fmt.Sprintf("projects/%s/locations/global/workloadIdentityPools/%s", projectID, settings.GcpWorkloadIdentityPoolID)
-	pid := providerID(namespace, kind, settings)
+	pid := providerID(namespace, kind, workloadProvider, settings)
 	providerName := fmt.Sprintf("%s/providers/%s", poolName, pid)
 
 	oidcPayload := map[string]any{
@@ -260,7 +338,7 @@ func EnsureIdp(ctx context.Context, projectID, namespace, issuerURL, audience st
 		"allowedAudiences": []string{audience},
 	}
 	if kc.embedJWKS {
-		jwksJSON, err := fetchJWKS(ctx, issuerURL, settings)
+		jwksJSON, err := fetchJWKS(ctx, issuerURL, settings, workloadProvider)
 		if err != nil {
 			return err
 		}
@@ -319,13 +397,19 @@ func EnsureIdp(ctx context.Context, projectID, namespace, issuerURL, audience st
 }
 
 // DeleteIdp deletes the KindOIDC/KindSpiffe provider for this namespace, if
-// present. No-op on 404.
-func DeleteIdp(ctx context.Context, projectID, namespace string, settings *config.Settings, kind string, oidcProvider oidc.Provider) error {
+// present. No-op on 404. workloadProvider must match whatever EnsureIdp
+// created this provider under (ignored for KindSpiffe, which has no
+// per-workload-provider variant — see providerID's doc comment); callers
+// that don't know which workload provider a namespace ever used (cleanup
+// paths running after the ServiceAccounts that used it are already gone)
+// should call this once per active provider, relying on the no-op-on-404
+// behavior for the ones that were never actually created.
+func DeleteIdp(ctx context.Context, projectID, namespace string, settings *config.Settings, kind, workloadProvider string, oidcProvider oidc.Provider) error {
 	accessToken, err := getGCPAccessToken(ctx, settings, oidcProvider)
 	if err != nil {
 		return err
 	}
-	pid := providerID(namespace, kind, settings)
+	pid := providerID(namespace, kind, workloadProvider, settings)
 	providerName := fmt.Sprintf(
 		"projects/%s/locations/global/workloadIdentityPools/%s/providers/%s",
 		projectID, settings.GcpWorkloadIdentityPoolID, pid,

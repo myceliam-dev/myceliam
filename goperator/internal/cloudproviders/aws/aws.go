@@ -5,14 +5,21 @@
 // listed in the referenced AwsAccessProfile. The IdP itself is one-per-
 // namespace-per-account; its ClientIDList grows as each SA in that namespace
 // opts in — the shared `myceliam-<namespace>` audience up front, plus that
-// SA's own name once it reconciles. Both are needed: AWS matches ClientIDList
-// against the token's `aud` claim *and* its `azp` claim, which Keycloak
-// always sets to the client_id — so the SA's own name lands there
-// automatically, no extra mapper required.
+// SA's own name once it reconciles, plus (for Auth0) its own
+// dynamically-assigned client_id, since that — not the SA name — is what
+// lands in azp there. Both audience and azp/client_id are needed: AWS
+// matches ClientIDList against the token's `aud` claim *and* its `azp`
+// claim when present. For Keycloak the SA's own name lands in azp
+// automatically (client_id fixed to it by construction, no extra mapper
+// required); Auth0 has no custom-client_id support, so its azp is unrelated
+// to the SA name and must be registered explicitly — see
+// oidc.Provider.EnsureAccessScope's azpValue return.
 //
-// Registration only — this does not create the IAM Role/trust-policy that
-// would actually grant permissions once federated; that's left to account
-// owners.
+// Registration and trust only — EnsureRoleTrust creates roleName if it
+// doesn't exist yet (trust policy only, no permissions attached), but this
+// package never attaches or implies an IAM permissions policy. What a
+// federated identity can actually *do* once trusted is still entirely up to
+// whatever policy an account owner attaches to the role themselves.
 package aws
 
 import (
@@ -61,6 +68,7 @@ type iamAPI interface {
 	RemoveClientIDFromOpenIDConnectProvider(ctx context.Context, params *iam.RemoveClientIDFromOpenIDConnectProviderInput, optFns ...func(*iam.Options)) (*iam.RemoveClientIDFromOpenIDConnectProviderOutput, error)
 	DeleteOpenIDConnectProvider(ctx context.Context, params *iam.DeleteOpenIDConnectProviderInput, optFns ...func(*iam.Options)) (*iam.DeleteOpenIDConnectProviderOutput, error)
 	GetRole(ctx context.Context, params *iam.GetRoleInput, optFns ...func(*iam.Options)) (*iam.GetRoleOutput, error)
+	CreateRole(ctx context.Context, params *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error)
 	UpdateAssumeRolePolicy(ctx context.Context, params *iam.UpdateAssumeRolePolicyInput, optFns ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error)
 }
 
@@ -151,9 +159,45 @@ func RemoveAudience(ctx context.Context, accountID, issuerURL, audience string, 
 	return nil
 }
 
-func DeleteIdp(ctx context.Context, accountID, issuerURL string, creds Credentials) error {
+// DeleteIdp deletes the IAM OIDC provider for issuerURL in accountID
+// outright. No-op if it's already gone. protectedClientIDs are client_ids
+// that must never be lost — typically the operator's own bootstrap
+// identifier for whichever provider it uses (see
+// cloudmodels.CloudFederationSpec.IssuerShared's doc comment for the real
+// live incident this guards against): if the provider's current
+// ClientIDList still contains any of them, deletion is refused as a safe
+// no-op rather than an error, since this isn't a failure — something else
+// still legitimately needs this provider to exist. Pass nil/empty when
+// there's nothing to protect.
+//
+// This alone doesn't make DeleteIdp safe to call for a provider whose
+// issuer might be shared across namespaces (Auth0) — callers there should
+// prefer RemoveAudience and never call this at all; this check is a second,
+// coarser line of defense specifically for the operator's own identity,
+// not a substitute for that caller-side judgment.
+func DeleteIdp(ctx context.Context, accountID, issuerURL string, protectedClientIDs []string, creds Credentials) error {
 	client := newIAMClient(creds)
 	arn := providerARN(accountID, issuerURL)
+
+	if len(protectedClientIDs) > 0 {
+		out, err := client.GetOpenIDConnectProvider(ctx, &iam.GetOpenIDConnectProviderInput{
+			OpenIDConnectProviderArn: awssdk.String(arn),
+		})
+		if err != nil && !isNoSuchEntity(err) {
+			return operr.Temporaryf(idpCallDelay, "Error checking OIDC provider '%s' in account %s before delete: %v", arn, accountID, err)
+		}
+		if err == nil {
+			existing := make(map[string]bool, len(out.ClientIDList))
+			for _, c := range out.ClientIDList {
+				existing[c] = true
+			}
+			for _, protected := range protectedClientIDs {
+				if existing[protected] {
+					return nil
+				}
+			}
+		}
+	}
 
 	_, err := client.DeleteOpenIDConnectProvider(ctx, &iam.DeleteOpenIDConnectProviderInput{
 		OpenIDConnectProviderArn: awssdk.String(arn),
@@ -246,73 +290,148 @@ func removeStatement(doc *trustPolicyDocument, sid string) bool {
 // statement allowing the entity identified by (issuerURL, audience,
 // subjectClaim=subjectValue) to assume it via AssumeRoleWithWebIdentity,
 // without disturbing any other existing trust statement. subjectClaim is
-// "azp" for Keycloak-issued tokens (the SA name) or "sub" for SPIFFE-issued
-// JWT-SVIDs (the full SPIFFE ID) — see models.SpiffeIDAnnotation's doc
-// comment for why SPIFFE can't use azp.
+// "azp" for Keycloak-issued tokens (the SA name), the
+// self-issued myceliam_service_account claim for Auth0 (see
+// cloudmodels.OidcSubjectClaim), or "sub" for SPIFFE-issued JWT-SVIDs (the
+// full SPIFFE ID) — see models.SpiffeIDAnnotation's doc comment for why
+// SPIFFE can't use azp.
 //
-// roleName must already exist — myceliam never creates IAM roles, only
-// manages trust on ones account owners provisioned out-of-band (same
-// registration-only model as the IdP itself).
-func EnsureRoleTrust(ctx context.Context, accountID, roleName, issuerURL, audience, subjectClaim, subjectValue string, creds Credentials) error {
+// azpValue is the value the token actually carries as azp — which AWS STS
+// folds into its own `:aud` policy-context key whenever the token carries
+// azp at all, confirmed live to happen even for a single-string (non-array)
+// raw aud claim, overriding it unconditionally rather than only in the
+// multi-valued case this package previously assumed. For Keycloak,
+// azpValue is always subjectValue itself (azp fixed to the SA name by
+// construction — see oidc.Provider.EnsureAccessScope's doc comment), so
+// passing subjectValue again there is correct and changes nothing. Auth0 is
+// the one case where azpValue differs from both audience and subjectValue
+// (its own dynamically-assigned client_id, unrelated to either) — pass ""
+// for callers that know their provider never sets azp at all (SPIFFE).
+//
+// sharedAudience must be true whenever audience is not already unique to
+// this one entity — see the condition-building comment
+// below for why this, not subjectClaim's literal name, is what decides which
+// matching strategy is safe.
+//
+// subjectClaimViaSessionTag is cloudmodels.CloudFederationSpec's field of
+// the same name — true (Auth0 only, today) when subjectClaim isn't usable as
+// a direct "<issuer>:<subjectClaim>" trust-policy condition key (confirmed
+// live: AWS never matches a custom claim injected at runtime by an Action
+// that way) and must instead be matched via "aws:RequestTag/<subjectClaim>"
+// plus the sts:TagSession action, relying on that same claim also being
+// projected into the token's "https://aws.amazon.com/tags" session-tags
+// claim. See CloudFederationSpec's own doc comment for the full story.
+//
+// If roleName doesn't exist yet, EnsureRoleTrust creates it with this trust
+// statement as its entire initial trust policy — myceliam still never
+// attaches or implies any permissions policy, so a freshly-created role can
+// assume-into but do nothing until an account owner attaches one; this is
+// creating the *principal*, not authorizing it, the same registration-only
+// boundary myceliam already draws around every other AWS/GCP resource (see
+// [Design principles](#design-principles)). Confirmed as the right default
+// live: requiring every role to be pre-provisioned out-of-band meant a
+// brand-new role had to start from *some* trust policy just to satisfy AWS's
+// "a role can't be created with an empty trust policy" rule, which in
+// practice meant hand-authoring the exact same web-identity statement this
+// function would write anyway. Existing roles are untouched beyond the one
+// statement this function manages, exactly as before.
+func EnsureRoleTrust(ctx context.Context, accountID, roleName, issuerURL, audience, subjectClaim, subjectValue, azpValue string, sharedAudience, subjectClaimViaSessionTag bool, creds Credentials) error {
 	client := newIAMClient(creds)
-
-	out, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: awssdk.String(roleName)})
-	if err != nil {
-		if isNoSuchEntity(err) {
-			return operr.Permanentf(
-				"IAM role '%s' does not exist in account %s — roles must be pre-provisioned "+
-					"out-of-band, myceliam never creates them.", roleName, accountID,
-			)
-		}
-		return operr.Temporaryf(idpCallDelay, "Error reading IAM role '%s' in account %s: %v", roleName, accountID, err)
-	}
-
-	doc, err := decodeTrustPolicy(out.Role.AssumeRolePolicyDocument)
-	if err != nil {
-		return operr.Temporaryf(idpCallDelay, "Error decoding trust policy for role '%s' in account %s: %v", roleName, accountID, err)
-	}
 
 	hostAndPath := strings.TrimPrefix(strings.TrimPrefix(issuerURL, "https://"), "http://")
 
-	// Whether Keycloak issues aud as a single string or a JSON array depends
-	// on which client scopes end up attached to the token (it appends its own
-	// default "account" audience whenever the "roles" scope's audience-resolve
-	// mapper is in play) — not something this code can assume either way. And
-	// per the OIDC spec, a multi-valued aud requires the token to carry azp
-	// identifying the true intended recipient; AWS's OIDC federation follows
-	// that spec exactly, resolving its own `:aud` policy-context key from azp
-	// whenever the raw aud claim is an array, rather than exposing the array
-	// itself. So depending on token shape, AWS may expose either our custom
-	// audience string (clean single-value aud) or subjectValue itself
-	// (multi-value, azp-folded) under `:aud` — never both, and never a
-	// separate `:azp` key. ForAnyValue:StringEquals against both acceptable
-	// values on the policy side handles either shape without needing to know
-	// which one a given deployment produces. SPIFFE JWT-SVIDs
-	// (subjectClaim=="sub") carry no azp and a single-valued aud, so they
-	// don't hit this and keep the straightforward aud+sub check.
+	// AWS's OIDC federation resolves its own `:aud` policy-context key from
+	// azp whenever the token carries azp at all — confirmed live to happen
+	// unconditionally, not only (as this package previously assumed) when
+	// the raw aud claim is a JSON array. So `:aud` may end up being our
+	// custom audience string (no azp on the token — SPIFFE) or azpValue
+	// (azp present — every OIDC provider's client-credentials tokens, in
+	// practice) — never both, and never a separate `:azp` key.
+	// ForAnyValue:StringEquals against every acceptable value handles
+	// whichever shape a given deployment produces without needing to know
+	// which one upfront.
+	//
+	// Matching `:aud` against this OR-list alone only proves identity when
+	// audience is already unique to this one SA *and* azpValue is too
+	// (Keycloak's convention: subjectClaim=="azp", azpValue==subjectValue,
+	// audience per-SA) — so no separate subjectClaim condition is needed to
+	// compensate there. Everywhere else (Auth0, whose azpValue is its own
+	// client_id, unrelated to subjectValue, and whose audience is
+	// namespace-shared; SPIFFE) a shared or azp-unrelated audience no longer
+	// proves identity by itself, so the strict subjectClaim==subjectValue
+	// condition below is additionally required — ANDed with the `:aud`
+	// OR-list, not a replacement for it, since AWS still exposes `:aud` as
+	// azpValue and the policy must accept whatever it actually sends.
+	audMatches := []any{audience}
+	if azpValue != "" && azpValue != audience {
+		audMatches = append(audMatches, azpValue)
+	}
 	condition := map[string]map[string]any{
 		// []any, not []string: upsertStatement compares this against a
 		// json.Unmarshal-decoded existing statement via reflect.DeepEqual,
 		// and a decoded JSON array always comes back as []any — a []string
 		// here would never match, defeating idempotency on every reconcile.
 		"ForAnyValue:StringEquals": {
-			hostAndPath + ":aud": []any{audience, subjectValue},
+			hostAndPath + ":aud": audMatches,
 		},
 	}
-	if subjectClaim != "azp" {
-		condition = map[string]map[string]any{
-			"StringEquals": {
-				hostAndPath + ":aud":             audience,
-				hostAndPath + ":" + subjectClaim: subjectValue,
-			},
+	if subjectClaim != "azp" || sharedAudience {
+		// subjectClaimViaSessionTag (Auth0): the claim is only real to AWS
+		// via the session-tags detour — confirmed live that
+		// "<issuer>:myceliam_service_account" never matches, while
+		// "aws:RequestTag/myceliam_service_account" does, given the
+		// tenant-wide Action projects the same value into the token's
+		// "https://aws.amazon.com/tags" claim. Every other provider's
+		// subjectClaim is a normal, provider-discoverable claim, matched
+		// directly against the issuer's own policy-context namespace.
+		subjectKey := hostAndPath + ":" + subjectClaim
+		if subjectClaimViaSessionTag {
+			subjectKey = "aws:RequestTag/" + subjectClaim
 		}
+		condition["ForAnyValue:StringEquals"][subjectKey] = subjectValue
+	}
+	// []any, not []string — same DeepEqual/idempotency reasoning as
+	// Condition above. sts:TagSession is only granted alongside
+	// subjectClaimViaSessionTag: that's the one case whose identity proof
+	// actually depends on the token's session tags being applied, and
+	// AssumeRoleWithWebIdentity requires the action whenever the token
+	// carries the "https://aws.amazon.com/tags" claim at all — confirmed
+	// live that omitting it produces a generic AccessDenied, not a
+	// TagSession-specific error.
+	action := []any{"sts:AssumeRoleWithWebIdentity"}
+	if subjectClaimViaSessionTag {
+		action = append(action, "sts:TagSession")
 	}
 	stmt := trustPolicyStatement{
 		Sid:       roleTrustStatementID(issuerURL, subjectClaim, subjectValue),
 		Effect:    "Allow",
 		Principal: map[string]any{"Federated": providerARN(accountID, issuerURL)},
-		Action:    "sts:AssumeRoleWithWebIdentity",
+		Action:    action,
 		Condition: condition,
+	}
+
+	out, err := client.GetRole(ctx, &iam.GetRoleInput{RoleName: awssdk.String(roleName)})
+	if err != nil {
+		if !isNoSuchEntity(err) {
+			return operr.Temporaryf(idpCallDelay, "Error reading IAM role '%s' in account %s: %v", roleName, accountID, err)
+		}
+		encoded, err := json.Marshal(trustPolicyDocument{Version: "2012-10-17", Statement: []trustPolicyStatement{stmt}})
+		if err != nil {
+			return fmt.Errorf("encoding initial trust policy for new role %q: %w", roleName, err)
+		}
+		if _, err := client.CreateRole(ctx, &iam.CreateRoleInput{
+			RoleName:                 awssdk.String(roleName),
+			AssumeRolePolicyDocument: awssdk.String(string(encoded)),
+			Description:              awssdk.String("Created by myceliam to trust OIDC/SPIFFE federation. myceliam manages trust only - attach a permissions policy separately to grant it any actual access."),
+		}); err != nil {
+			return operr.Temporaryf(idpCallDelay, "Error creating IAM role '%s' in account %s: %v", roleName, accountID, err)
+		}
+		return nil
+	}
+
+	doc, err := decodeTrustPolicy(out.Role.AssumeRolePolicyDocument)
+	if err != nil {
+		return operr.Temporaryf(idpCallDelay, "Error decoding trust policy for role '%s' in account %s: %v", roleName, accountID, err)
 	}
 
 	if !upsertStatement(&doc, stmt) {

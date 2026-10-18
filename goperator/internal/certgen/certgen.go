@@ -1,6 +1,6 @@
 // Package certgen ports pythonoperator/src/myceliam/certgen.py: generating a
 // self-signed RSA keypair/certificate for signedjwt clients that have no
-// pre-existing <sa-name>-oidc-credentials secret to read a cert from.
+// pre-existing credentials secret to read a cert from.
 package certgen
 
 import (

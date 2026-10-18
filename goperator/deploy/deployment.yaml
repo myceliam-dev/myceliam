@@ -10,6 +10,17 @@ metadata:
   namespace: myceliam-system
 spec:
   replicas: 1
+  # cmd/main.go deliberately runs with no leader election (single-instance,
+  # matching kopf's --standalone mode) — but Kubernetes' default Deployment
+  # strategy (RollingUpdate) starts the new pod BEFORE stopping the old one,
+  # so any redeploy briefly runs two uncoordinated operator processes
+  # reconciling the same objects at once. Confirmed live: this raced
+  # ensureApp's find-then-create check in the Auth0 provider, producing two
+  # duplicate Applications for the same ServiceAccount. Recreate guarantees
+  # the old pod fully stops before the new one starts, matching the
+  # single-instance assumption everywhere else in this operator.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: myceliam-operator
@@ -90,17 +101,16 @@ spec:
             # with a different issuer). Note this alone does NOT drop the
             # myceliam-keycloak-secret/-keypair requirement — the operator
             # still needs one of those for Admin REST API access as long as
-            # MYCELIAM_OIDC_PROVIDER=keycloak (the default); also set
-            # MYCELIAM_OIDC_PROVIDER=none below if this deployment only ever
-            # uses clienttype=spiffe ServiceAccounts and needs neither.
-            # - name: MYCELIAM_OPERATOR_IDENTITY_SOURCE
+            # MYCELIAM_KEYCLOAK_URL is set above (which makes Keycloak an
+            # active workload provider); remove MYCELIAM_KEYCLOAK_URL instead
+            # if this deployment only ever uses clienttype=spiffe
+            # ServiceAccounts and needs no OIDC workload provider at all.
+            # - name: MYCELIAM_OPERATOR_PROVIDER
             #   value: "spiffe"
             # - name: MYCELIAM_OPERATOR_SPIFFE_AUDIENCE
             #   value: "<audience the admin configured on the bootstrap IdP/WLI provider>"
             # - name: SPIFFE_ENDPOINT_SOCKET
             #   value: "unix:///spiffe-workload-api/spire-agent.sock"
-            # - name: MYCELIAM_OIDC_PROVIDER
-            #   value: "none"
           # Also uncomment this volumeMounts/volumes pair together with the env vars
           # above — the operator's own pod needs the same spiffe-csi-driver mount any
           # clienttype=spiffe ServiceAccount gets, to reach the local SPIRE agent's

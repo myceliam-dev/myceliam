@@ -1,0 +1,1237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>myceliam</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --bg-alt: #101018;
+    --panel: #14141d;
+    --border: #262636;
+    --text: #e8e6f0;
+    --text-dim: #9490a8;
+    --gold: #d4a941;
+    --gold-bright: #f0c869;
+    --purple: #6b4fd6;
+    --purple-bright: #8a6fef;
+    --orange: #e2732f;
+    --orange-bright: #f79149;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    line-height: 1.65;
+    overflow-x: hidden;
+  }
+
+  /* ---------- background mycelium network ---------- */
+  #network {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    opacity: 0.35;
+    pointer-events: none;
+  }
+
+  .bg-glow {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    background:
+      radial-gradient(ellipse 900px 600px at 50% -5%, rgba(212,169,65,0.10), transparent 60%),
+      radial-gradient(ellipse 700px 500px at 15% 40%, rgba(107,79,214,0.12), transparent 60%),
+      radial-gradient(ellipse 700px 500px at 85% 60%, rgba(226,115,47,0.10), transparent 60%);
+    pointer-events: none;
+  }
+
+  main { position: relative; z-index: 1; }
+
+  a { color: var(--gold-bright); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  code, pre, kbd {
+    font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace;
+  }
+
+  code {
+    background: rgba(255,255,255,0.06);
+    border: 1px solid var(--border);
+    padding: 0.1em 0.4em;
+    border-radius: 4px;
+    font-size: 0.88em;
+    color: var(--gold-bright);
+  }
+
+  pre {
+    background: #0d0d13;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.1rem 1.3rem;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.02);
+  }
+  pre code { background: none; border: none; padding: 0; color: var(--text); }
+
+  .container {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 0 1.75rem;
+  }
+
+  /* ---------- nav ---------- */
+  nav {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    backdrop-filter: blur(14px);
+    background: rgba(10,10,15,0.72);
+    border-bottom: 1px solid var(--border);
+  }
+  nav .container {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-top: 0.85rem;
+    padding-bottom: 0.85rem;
+    max-width: 1120px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text);
+    flex-shrink: 0;
+  }
+  .brand img { height: 26px; width: 26px; object-fit: cover; border-radius: 6px; }
+  .nav-right {
+    display: flex;
+    align-items: center;
+    gap: 1.75rem;
+  }
+  nav ul {
+    list-style: none;
+    display: flex;
+    gap: 1.75rem;
+    margin: 0;
+    padding: 0;
+    font-size: 0.88rem;
+  }
+  nav ul a { color: var(--text-dim); }
+  nav ul a:hover { color: var(--gold-bright); text-decoration: none; }
+  .nav-links { display: flex; }
+  .nav-github {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.4rem 0.95rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+    white-space: nowrap;
+    transition: border-color 0.15s ease, color 0.15s ease;
+  }
+  .nav-github:hover {
+    border-color: var(--gold);
+    color: var(--gold-bright);
+    text-decoration: none;
+  }
+  @media (max-width: 900px) {
+    .nav-links { display: none; }
+  }
+
+  /* ---------- hero ---------- */
+  .hero {
+    text-align: center;
+    padding: 5rem 1.5rem 3.5rem;
+  }
+  .hero img.logo {
+    width: 190px;
+    height: 190px;
+    object-fit: cover;
+    border-radius: 28px;
+    box-shadow:
+      0 0 0 1px rgba(255,255,255,0.06),
+      0 20px 60px -15px rgba(212,169,65,0.35),
+      0 0 90px -20px rgba(107,79,214,0.4);
+    animation: float 6s ease-in-out infinite;
+  }
+  @keyframes float {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-10px); }
+  }
+  .hero h1 {
+    font-size: clamp(2.6rem, 6vw, 4rem);
+    margin: 1.75rem 0 0.6rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    background: linear-gradient(90deg, var(--gold-bright) 0%, var(--gold) 22%, var(--purple-bright) 52%, var(--orange) 78%, var(--orange-bright) 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .hero .tagline {
+    font-size: 1.2rem;
+    color: var(--text-dim);
+    max-width: 640px;
+    margin: 0 auto;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 1.75rem;
+    padding: 0.45rem 1rem;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+    font-size: 0.82rem;
+    color: var(--text-dim);
+  }
+  .badge .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--orange-bright);
+    box-shadow: 0 0 8px var(--orange-bright);
+    animation: pulse 2s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+  }
+  .hero-cta {
+    margin-top: 2.25rem;
+    display: flex;
+    gap: 0.9rem;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
+  .btn {
+    padding: 0.7rem 1.4rem;
+    border-radius: 9px;
+    font-size: 0.92rem;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+  }
+  .btn:hover { text-decoration: none; transform: translateY(-1px); }
+  .btn.primary {
+    background: linear-gradient(90deg, var(--purple), var(--orange));
+    border: none;
+    color: #fff;
+  }
+  .btn.primary:hover { filter: brightness(1.1); }
+  .btn.ghost { color: var(--text); background: var(--panel); }
+  .btn.ghost:hover { border-color: var(--gold); color: var(--gold-bright); }
+
+  /* ---------- sections ---------- */
+  section { padding: 3.25rem 0; }
+  section h2 {
+    font-size: 1.7rem;
+    margin: 0 0 1.1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    letter-spacing: -0.01em;
+  }
+  section h2::before {
+    content: "";
+    width: 4px;
+    height: 1.3rem;
+    border-radius: 2px;
+    background: linear-gradient(180deg, var(--gold), var(--purple), var(--orange));
+    display: inline-block;
+  }
+  .lede {
+    color: var(--text-dim);
+    font-size: 1.02rem;
+  }
+
+  /* ---------- pitch stack ---------- */
+  .pitch-stack {
+    margin-top: 2.25rem;
+    display: flex;
+    flex-direction: column;
+    gap: 2.75rem;
+  }
+  .pitch-group {
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+  }
+  .pitch-eyebrow {
+    font-size: 0.76rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    color: var(--text-dim);
+    opacity: 0.75;
+  }
+  .pitch-line {
+    position: relative;
+    padding-left: 1.5rem;
+    font-size: clamp(1.05rem, 1.9vw, 1.3rem);
+    line-height: 1.55;
+    font-weight: 500;
+    color: var(--text-dim);
+    max-width: 760px;
+  }
+  .pitch-line::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.35em;
+    width: 4px;
+    height: 1.15em;
+    border-radius: 2px;
+  }
+  .pitch-line.c-gold::before { background: var(--gold); }
+  .pitch-line.c-purple::before { background: var(--purple); }
+  .pitch-line.c-orange::before { background: var(--orange); }
+  .pitch-line.c-muted::before { background: var(--text-dim); opacity: 0.55; }
+  .pitch-line strong {
+    color: var(--text);
+    font-weight: 700;
+  }
+  .pitch-line.pitch-analogy {
+    font-size: clamp(1.2rem, 2.2vw, 1.5rem);
+    max-width: 820px;
+  }
+  .pitch-line.pitch-analogy .gradient {
+    background: linear-gradient(90deg, var(--gold-bright), var(--purple-bright));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    font-weight: 700;
+  }
+  .pitch-group.pitch-boundary-group {
+    border-top: 1px solid var(--border);
+    padding-top: 1.75rem;
+    gap: 0.6rem;
+  }
+  .pitch-line.pitch-boundary {
+    color: var(--text-dim);
+  }
+
+  .divider {
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--border), transparent);
+    border: none;
+    margin: 0;
+  }
+
+  .video-wrap {
+    position: relative;
+    width: 100%;
+    max-width: 820px;
+    margin: 1.75rem auto 0;
+    aspect-ratio: 16 / 9;
+    border-radius: 14px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    box-shadow: 0 20px 60px -25px rgba(0,0,0,0.6);
+  }
+  .video-wrap iframe {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    border: 0;
+  }
+
+  /* card grid */
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1rem;
+    margin-top: 1.5rem;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.3rem 1.4rem;
+    transition: border-color 0.2s ease, transform 0.2s ease;
+  }
+  .card:hover {
+    border-color: rgba(212,169,65,0.4);
+    transform: translateY(-2px);
+  }
+  .card h3 {
+    margin: 0 0 0.5rem;
+    font-size: 1rem;
+    color: var(--gold-bright);
+  }
+  .card p { margin: 0; color: var(--text-dim); font-size: 0.92rem; }
+
+  /* client-type table -> cards */
+  .ctype {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 1rem;
+    margin-top: 1.5rem;
+  }
+  .ctype .card .tag {
+    display: inline-block;
+    font-family: "SF Mono", ui-monospace, monospace;
+    font-size: 0.78rem;
+    padding: 0.15rem 0.55rem;
+    border-radius: 5px;
+    margin-bottom: 0.6rem;
+  }
+  .tag.secret { background: rgba(107,79,214,0.18); color: var(--purple-bright); }
+  .tag.signedjwt { background: rgba(212,169,65,0.18); color: var(--gold-bright); }
+  .tag.spiffe { background: rgba(226,115,47,0.18); color: var(--orange-bright); }
+
+  /* config table */
+  .table-wrap { overflow-x: auto; margin-top: 1.25rem; border: 1px solid var(--border); border-radius: 12px; }
+  table { border-collapse: collapse; width: 100%; font-size: 0.86rem; }
+  th, td { text-align: left; padding: 0.65rem 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { background: var(--bg-alt); color: var(--text-dim); font-weight: 600; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.04em; }
+  tr:last-child td { border-bottom: none; }
+  td:first-child { white-space: nowrap; color: var(--gold-bright); }
+
+  details {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1rem 1.3rem;
+    margin-top: 1rem;
+  }
+  details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--text);
+    list-style: none;
+  }
+  details summary::-webkit-details-marker { display: none; }
+  details summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 0.5rem;
+    color: var(--gold-bright);
+    transition: transform 0.15s ease;
+  }
+  details[open] summary::before { transform: rotate(90deg); }
+  details .table-wrap { margin-top: 1rem; }
+  details p.lede { margin-top: 0.9rem; }
+
+  ul.limits { margin: 1.25rem 0 0; padding-left: 0; list-style: none; }
+  ul.limits li {
+    position: relative;
+    padding-left: 1.6rem;
+    margin-bottom: 0.9rem;
+    color: var(--text-dim);
+    font-size: 0.94rem;
+  }
+  ul.limits li::before {
+    content: "!";
+    position: absolute;
+    left: 0;
+    top: 0.05rem;
+    width: 1.05rem;
+    height: 1.05rem;
+    font-size: 0.7rem;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    background: rgba(226,115,47,0.18);
+    color: var(--orange-bright);
+  }
+
+  .steps {
+    counter-reset: step;
+    margin-top: 1.5rem;
+  }
+  .step {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 1.4rem;
+  }
+  .step .num {
+    counter-increment: step;
+    flex-shrink: 0;
+    width: 2rem;
+    height: 2rem;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--purple), var(--orange));
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 0.9rem;
+    color: #fff;
+  }
+  .step .num::before { content: counter(step); }
+  .step .body h4 { margin: 0.15rem 0 0.4rem; font-size: 1rem; }
+  .step .body p { margin: 0 0 0.6rem; color: var(--text-dim); font-size: 0.92rem; }
+
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 3rem 0 4rem;
+    text-align: center;
+    color: var(--text-dim);
+    font-size: 0.88rem;
+  }
+  footer .links {
+    display: flex;
+    gap: 1.5rem;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin-bottom: 1.25rem;
+  }
+  footer .links a { color: var(--text-dim); }
+  footer .links a:hover { color: var(--gold-bright); }
+
+  ::selection { background: rgba(107,79,214,0.4); color: #fff; }
+</style>
+</head>
+<body>
+
+<canvas id="network"></canvas>
+<div class="bg-glow"></div>
+
+<nav>
+  <div class="container">
+    <div class="brand"><img src="myceliam-logo.png" alt=""> myceliam</div>
+    <div class="nav-right">
+      <ul class="nav-links">
+        <li><a href="#video">Video</a></li>
+        <li><a href="#principles">Design</a></li>
+        <li><a href="#how-it-works">How it works</a></li>
+        <li><a href="#spiffe">SPIFFE</a></li>
+        <li><a href="#cloud">Cloud federation</a></li>
+        <li><a href="#operator-identity">Operator identity</a></li>
+        <li><a href="#limitations">Limitations</a></li>
+        <li><a href="#vision">Vision</a></li>
+      </ul>
+      <a class="nav-github" href="https://github.com/myceliam-dev/myceliam" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<main>
+
+  <section class="hero container">
+    <img class="logo" src="myceliam-logo.png" alt="myceliam logo — a key rooted in a mycelium-like circuit network">
+    <h1>myceliam</h1>
+    <p class="tagline">
+      A Kubernetes-native identity federation control plane: it connects workload
+      identities — from sources such as SPIFFE and OIDC — to cloud IAM in environments
+      such as AWS and GCP, and declaratively keeps that trust in sync.
+    </p>
+    <div class="badge"><span class="dot"></span> early-stage — exercised end-to-end against real Keycloak, Auth0, SPIRE, AWS, and GCP, not yet hardened for production</div>
+    <div class="hero-cta">
+      <a class="btn primary" href="#video">Watch the intro ▸</a>
+      <a class="btn ghost" href="https://github.com/myceliam-dev/myceliam" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <section class="container" id="video">
+    <h2>Watch the intro</h2>
+    <div class="video-wrap">
+      <iframe
+        src="https://www.youtube.com/embed/vevjAPCW16s"
+        title="myceliam intro video"
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+        allowfullscreen
+      ></iframe>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <section class="container">
+    <h2>Why "myceliam"?</h2>
+    <p class="lede">
+      myceliam serves as an integration layer between identity providers and cloud
+      providers.
+    </p>
+    <p class="lede" style="margin-top:1rem;">
+      As a Kubernetes-native solution, myceliam takes a unique, Kubernetes-centric
+      approach to identity federation. It understands and preserves the logical
+      boundaries defined by Kubernetes namespaces and ServiceAccounts, and extends
+      those boundaries into external identity and cloud platforms.
+    </p>
+    <p class="lede" style="margin-top:1rem;">
+      Within an identity provider, myceliam maps Kubernetes namespaces to realms and
+      ServiceAccounts to clients within those realms. At the cloud-provider layer, it
+      translates these same Kubernetes identity constructs into identity/workload
+      identity providers and trusted identity relationships.
+    </p>
+    <p class="lede" style="margin-top:1rem;">
+      In this way, myceliam continuously reconciles Kubernetes-native identity
+      constructs with their corresponding representations across identity and cloud
+      providers, keeping the entire federation model aligned.
+    </p>
+    <p class="lede" style="margin-top:1rem;">
+      Named after <em>mycelium</em> — the underground network of fungal threads that
+      connects otherwise-separate organisms and exchanges nutrients between them, the
+      root network beneath the visible mushroom. That's the role this operator plays.
+      Kubernetes, an identity provider, and a cloud account each already know how to
+      trust <em>something</em> — Kubernetes trusts its own ServiceAccount tokens,
+      Keycloak or SPIRE issue JWTs they'll vouch for, AWS and GCP accept federated
+      tokens from an IdP they trust — but nothing connects those three trust
+      relationships into one chain by default. A ServiceAccount in namespace
+      <code>foo</code> and an IAM role in some AWS account have no idea the other exists
+      until something wires them together. myceliam is that wiring: label a
+      ServiceAccount, and its Kubernetes identity extends outward, unbroken, as far as
+      an <code>AwsAccessProfile</code>/<code>GcpAccessProfile</code> says it should reach.
+    </p>
+    <p class="lede" style="margin-top:1rem;">
+      The conventional alternative is a long-lived credential sitting in a Secret — an
+      AWS access key, a GCP service-account JSON key — minted somewhere, distributed
+      somehow, rotated by someone, and a liability at every one of those steps. AWS and
+      GCP have both had a federate-instead-of-mint answer to this for years
+      (<code>AssumeRoleWithWebIdentity</code>, Workload Identity Federation), but using
+      it by hand means standing up an OIDC provider per identity source, keeping its
+      JWKS in sync, and writing IAM trust conditions per workload — enough friction that
+      the static-key path usually wins by default, not because it's actually better.
+      myceliam exists to make the federated path the easy one, kept in sync on every
+      reconcile, so there's no longer a reason to reach for a static key at all.
+    </p>
+  </section>
+
+  <hr class="divider">
+
+  <section class="container" id="pitch">
+    <h2>The short version</h2>
+    <div class="pitch-stack">
+      <div class="pitch-group">
+        <div class="pitch-eyebrow">The core idea</div>
+        <p class="pitch-line c-gold">
+          myceliam turns Kubernetes Namespaces and ServiceAccounts into the
+          source of truth for identity — everywhere that identity needs to
+          reach.
+        </p>
+        <p class="pitch-line c-gold">
+          Kubernetes already knows who your workloads are.
+          <strong>myceliam is what makes the rest of the world agree.</strong>
+        </p>
+        <p class="pitch-line c-gold">
+          One label on a ServiceAccount, and its identity extends outward
+          into every cloud it's trusted to reach.
+        </p>
+      </div>
+      <div class="pitch-group">
+        <div class="pitch-eyebrow">The Argo CD analogy</div>
+        <p class="pitch-line pitch-analogy c-orange">
+          Argo CD reconciles Git into Kubernetes.
+          <span class="gradient">myceliam reconciles Kubernetes into the cloud.</span>
+        </p>
+        <p class="pitch-line c-orange">
+          If Argo CD is GitOps for your cluster, myceliam is GitOps for your
+          workload identity.
+        </p>
+        <p class="pitch-line c-orange">
+          Same idea as GitOps, opposite direction: instead of pulling desired
+          state in, myceliam pushes it out.
+        </p>
+      </div>
+      <div class="pitch-group">
+        <div class="pitch-eyebrow">The networking analogy</div>
+        <p class="pitch-line pitch-analogy c-purple">
+          A TCP handshake opens a connection between two hosts.
+          <span class="gradient">myceliam opens one between a ServiceAccount and the cloud.</span>
+        </p>
+        <p class="pitch-line c-purple">
+          Delete the ServiceAccount, or drop its labels, and myceliam tears
+          that connection down — no lingering trust, same as a closed socket.
+        </p>
+        <p class="pitch-line c-purple">
+          It only works end to end, like QoS or MTU on a network — one hop
+          that doesn't honor the setting, and the whole path breaks no matter
+          how correct everything else is.
+        </p>
+      </div>
+      <div class="pitch-group pitch-boundary-group">
+        <div class="pitch-eyebrow">The boundary</div>
+        <p class="pitch-line pitch-boundary c-muted">
+          myceliam builds the bridge of trust — what an identity can do once
+          it crosses is still up to your cloud's own IAM.
+        </p>
+        <p class="pitch-line pitch-boundary c-muted">
+          Registration, not authorization: myceliam earns the trust, your IAM
+          policies still decide what happens next.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <section class="container" id="principles">
+    <h2>Design principles</h2>
+    <div class="grid">
+      <div class="card">
+        <h3>Every cluster is independently addressable</h3>
+        <p>A cluster ID is folded into every realm name and GCP provider ID the
+        operator creates, and stamped as an ownership attribute on every Keycloak
+        realm/client it touches. Two clusters sharing the same Keycloak/AWS/GCP
+        backends can have identically named namespaces without colliding — and if one
+        cluster ever finds a realm stamped with a <em>different</em> cluster's ID, it
+        refuses to touch it rather than silently adopting it.</p>
+      </div>
+      <div class="card">
+        <h3>Isolation that actually carries through</h3>
+        <p>Each namespace gets its own Keycloak realm (or SPIFFE ID hierarchy) and its
+        own per-namespace, per-cloud federation audiences. A workload in one namespace
+        can't present a token another namespace's cloud trust would accept.</p>
+      </div>
+      <div class="card">
+        <h3>Audiences are only as shared as they're safe to be</h3>
+        <p>On AWS, every ServiceAccount gets its own audience — sharing one across a
+        namespace's SAs would let any SA's token satisfy every other SA's trust
+        condition. On GCP the audience only needs to be namespace-shared, since GCP's
+        real identity narrowing comes from <code>google.subject</code> bindings, not
+        <code>aud</code> — so a shared audience there costs nothing. Auth0's own model
+        currently shares one Application/audience per namespace and leans on a custom
+        claim instead — which holds for GCP's attribute conditions directly, but needs
+        one more step on AWS, since AWS trust policies can't see custom claims directly
+        (see Known limitations). The fix: the same Action also maps the claim into an AWS
+        session tag instead of a raw trust-policy condition — confirmed working live, and
+        implemented today.</p>
+      </div>
+      <div class="card">
+        <h3>No static cloud credentials</h3>
+        <p>AWS temporary credentials and GCP access tokens are obtained via federation
+        at request time, by the workload itself — never stored as a Secret with a
+        static key, and never proxied through the operator.</p>
+      </div>
+      <div class="card">
+        <h3>Declarative, Kubernetes-native</h3>
+        <p>ServiceAccount labels plus namespace-scoped CRDs are the entire interface —
+        no manual setup in the Keycloak admin console or a cloud IAM console, beyond
+        each cloud's one-time bootstrap trust for the operator's own identity.</p>
+      </div>
+      <div class="card">
+        <h3>Registration and trust, not authorization</h3>
+        <p>myceliam establishes trust — realms/clients, IAM OIDC providers, Workload
+        Identity providers — and, <strong>AWS only</strong>, creates a referenced IAM role
+        outright if it doesn't exist yet (trust policy only, no permissions attached). It
+        never creates a GCP service account, and never attaches or implies the policy
+        binding that grants actual permissions once federated on either cloud. That stays
+        with whoever owns the account/project.</p>
+      </div>
+    </div>
+    <p class="lede" style="margin-top:1.5rem;">
+      Put another way: Kubernetes isn't just where the operator happens to run — a CRD
+      <em>is</em> the desired-state declaration, and the reconcile loop is the whole
+      mechanism, not a one-time setup script.
+    </p>
+    <pre><code>Kubernetes CRD
+      ↓
+   myceliam
+      ↓
+Federation reconciliation
+      ↓
+   Cloud IAM</code></pre>
+    <p class="lede">
+      Add a target to an <code>AwsAccessProfile</code>/<code>GcpAccessProfile</code>, and
+      myceliam creates the trust relationship. Remove it, and myceliam removes it. If
+      something drifts — a trust policy edited by hand, a secret rotated directly in
+      Keycloak — the next reconcile puts it back. There's no separate "run this once"
+      step to remember.
+    </p>
+  </section>
+
+  <section class="container" id="how-it-works">
+    <h2>How it works</h2>
+    <p class="lede">
+      Label a ServiceAccount with <code>myceliam.io/autoidp=true</code> plus a
+      <code>myceliam.io/client-type</code> label, and the operator provisions an
+      identity for it. A SPIFFE-identified workload skips the client-type label
+      entirely — its identity already comes from SPIRE (see below).
+    </p>
+    <div class="ctype">
+      <div class="card">
+        <span class="tag secret">secret</span>
+        <p>Creates a client (Keycloak or Auth0 — see below) authenticated with a
+        client secret. The client ID, secret, and issuer are written to a Secret named
+        <code>&lt;sa-name&gt;-secret-&lt;provider&gt;-credentials</code>.</p>
+      </div>
+      <div class="card">
+        <span class="tag signedjwt">signedjwt</span>
+        <p>Configures the client for <code>private_key_jwt</code> auth instead, using a
+        JWKS derived from a cert in a paired Secret — either one you provide (e.g. via
+        cert-manager) or one the operator generates for you if it doesn't exist yet.
+        Editing the cert later is picked up and re-uploaded automatically. <code>client_id</code>
+        (and, for Auth0, its own assigned <code>kid</code>) live in a separate
+        <code>&lt;sa-name&gt;-jwt-&lt;provider&gt;-metadata</code> Secret, so the credentials
+        Secret itself stays a pure <code>kubernetes.io/tls</code> object.</p>
+      </div>
+      <div class="card">
+        <span class="tag spiffe">spiffe</span>
+        <p>No client-type label, no realm/tenant/client/Secret at all — just the
+        <code>spiffe-jwt-issuer</code>/<code>spiffe-id</code> annotations. The workload
+        gets its identity from SPIRE directly; myceliam only registers the cloud-side
+        trust.</p>
+      </div>
+    </div>
+    <p class="lede" style="margin-top:1.5rem;">
+      The operator can run <strong>multiple identity providers active at once</strong> —
+      Keycloak and Auth0 are each active whenever their own config env vars are
+      present, not a single global choice. A ServiceAccount picks which one via
+      <code>myceliam.io/oidc-provider</code> — optional when exactly one provider is active
+      (inferred automatically), required whenever more than one is.
+    </p>
+    <p class="lede" style="margin-top:1rem;">
+      The operator re-reconciles every labeled ServiceAccount on a timer (default 300s)
+      to catch drift made directly against the provider or a cloud console, and deleting
+      the ServiceAccount deletes its client — the realm/tenant itself stays, since other
+      ServiceAccounts in the namespace may still use it.
+    </p>
+  </section>
+
+  <section class="container" id="spiffe">
+    <h2>SPIFFE-based clients</h2>
+    <p class="lede">
+      A SPIFFE-identified workload gets a JWT-SVID from its local
+      <a href="https://spiffe.io/" target="_blank" rel="noopener">SPIRE</a> agent over
+      the SPIFFE Workload API, entirely outside myceliam's involvement. myceliam's only
+      role is registering the AWS IdP / GCP Workload Identity provider needed to accept
+      that token — a SPIFFE-identified ServiceAccount with no cloud-access label
+      reconciles to a no-op.
+    </p>
+    <p class="lede">
+      Here's a real, easy-to-miss gotcha this project ran into directly: AWS rejects a
+      JWT outright when its <code>aud</code> claim has more than one value and no
+      <code>azp</code> claim disambiguates it. Keycloak always stamps <code>azp</code>
+      on every token it issues, so a Keycloak-backed workload can request every audience
+      it needs in one combined token. SPIFFE JWT-SVIDs never carry <code>azp</code> at
+      all — so a SPIFFE-identified workload that needs both AWS and GCP has to fetch
+      <strong>two separate, single-audience</strong> JWT-SVIDs, one per cloud, rather
+      than one combined token. GCP alone would have tolerated a combined SVID; AWS
+      won't, and there's no way around it from the client side — only around it, by
+      fetching twice.
+    </p>
+  </section>
+
+  <section class="container" id="cloud">
+    <h2>Cloud IdP federation</h2>
+    <p class="lede">
+      A ServiceAccount opts into federation via
+      <code>myceliam.io/aws-access-profile</code> / <code>myceliam.io/gcp-access-profile</code>
+      labels, each naming an <code>AwsAccessProfile</code> / <code>GcpAccessProfile</code>
+      custom resource that lists target accounts/projects and the roles or service
+      accounts within them a namespace's ServiceAccounts may federate into:
+    </p>
+    <pre><code>apiVersion: myceliam.io/v1
+kind: AwsAccessProfile
+metadata:
+  namespace: demo
+  name: awsap-demo
+accounts:
+  "123456789012":
+    - my-app-role</code></pre>
+    <p class="lede">
+      There's no per-SA role selection within a profile — every ServiceAccount
+      referencing a given profile gets identical access to everything it lists; split
+      into multiple profiles for finer granularity.
+    </p>
+    <p class="lede">
+      For each (profile, ServiceAccount) pair, the operator grants access to an
+      audience-scoped resource — the exact mechanism depends on the workload's
+      <code>oidc-provider</code>. Keycloak gets a per-(cloud, SA) client scope carrying an
+      Audience mapper: a unique <code>aws-&lt;namespace&gt;-&lt;sa&gt;</code> value per
+      ServiceAccount for AWS, a namespace-shared <code>gcp-&lt;namespace&gt;</code> value for
+      GCP. Auth0 instead gets one shared Resource Server (+ Client
+      Grant) per (cloud, cluster, namespace) — <code>&lt;cloud&gt;-&lt;cluster-id&gt;-&lt;namespace&gt;</code>
+      — since it has no equivalent to Keycloak's cheap per-client-scope primitive; the
+      set of Client Grants, not the audience itself, is what scopes access per SA there.
+      Either way, the operator registers the namespace's realm/tenant (or, for SPIFFE
+      ServiceAccounts, the SA's own SPIFFE issuer) as an IAM OIDC provider / Workload
+      Identity provider in every listed account/project, with a <em>separate</em> GCP
+      Workload Identity provider per (cloud kind, oidc-provider) — a Keycloak-backed and an
+      Auth0-backed workload in the same namespace never share one provider or issuer — and
+      grants trust on every role/service-account listed.
+    </p>
+    <p class="lede">
+      Each listed role/service-account is expected to already exist — <strong>except on
+      AWS</strong>, where a listed role that doesn't exist yet is created outright, with the
+      web-identity trust statement as its entire initial trust policy and no permissions
+      attached. This is AWS-only: GCP service accounts are never created by myceliam, only
+      granted impersonation on ones a project owner already provisioned — GCP has no
+      equivalent to AWS's cheap "create a role that can trust something but do nothing yet."
+    </p>
+    <p class="lede">
+      Tearing a ServiceAccount down always removes its own scope/grant and trust grant
+      immediately; the shared IdP/provider resource itself only goes away once no sibling
+      ServiceAccount in the namespace still references the same profile — except for
+      Auth0's two namespace-scoped Resource Servers, which also get force-deleted outright
+      the moment the namespace itself is torn down, regardless of any individual SA's own
+      cleanup history. Unlike Keycloak's realm (one object whose deletion cascades
+      everything under it), Auth0 has no such container, so relying solely on each SA
+      noticing "I'm the last reference" could otherwise leave a Resource Server orphaned
+      forever if that per-SA cleanup ever didn't run to completion — confirmed live.
+    </p>
+    <p class="lede">
+      This is registration and trust, not authorization — the IAM/GCP policy binding that
+      grants actual permissions is left to account/project owners either way.
+    </p>
+  </section>
+
+  <section class="container" id="operator-identity">
+    <h2>The operator's own identity</h2>
+    <p class="lede">
+      Everything above needs the operator itself to call an Admin/Management API and get
+      its own AWS/GCP credentials to register IdPs/providers in the first place. Which
+      provider backs the operator's <em>own</em> identity
+      (<code>MYCELIAM_OPERATOR_PROVIDER</code>: <code>keycloak</code>, <code>auth0</code>, or
+      <code>spiffe</code>) is fully decoupled from which
+      provider(s) are active for workloads above; a Keycloak-only-for-workloads deployment
+      can still bootstrap its own cloud credentials from SPIRE, or vice versa. When
+      Keycloak backs the operator, everything traces back to one Keycloak client, distinct
+      from any client it creates on behalf of a workload. Unlike the keypairs it generates
+      for <code>signedjwt</code> workloads, the operator never generates a credential for
+      <em>itself</em> — it only reads whichever of two well-known Secrets an admin has
+      already placed in its own namespace. If both exist, the keypair wins.
+    </p>
+    <div class="ctype">
+      <div class="card">
+        <span class="tag secret">Option A</span>
+        <h3 style="margin-top:0.3rem;">Client secret</h3>
+        <p>A plain Opaque Secret holding <code>client-secret</code>. The simplest path,
+        and the one every deployment starts from.</p>
+      </div>
+      <div class="card">
+        <span class="tag signedjwt">Option B</span>
+        <h3 style="margin-top:0.3rem;">Signed-JWT keypair</h3>
+        <p>A plain <code>kubernetes.io/tls</code> Secret — <code>tls.crt</code>/
+        <code>tls.key</code> only, nothing else, so it stays compatible with
+        cert-manager or any other standard TLS rotation tooling. Requires the admin to
+        have already uploaded that exact certificate to the client's Credentials tab in
+        Keycloak (single-certificate "Signed Jwt" mode — <strong>no <code>kid</code>
+        needed</strong>: confirmed empirically that including one breaks it with
+        "Unable to load public key", since Keycloak's single-certificate mode does its
+        own key lookup with nothing to disambiguate).</p>
+      </div>
+    </div>
+    <details style="margin-top:1.5rem;">
+      <summary>Advanced: bootstrap the operator's own cloud credentials from SPIRE instead</summary>
+      <p class="lede">
+        <code>MYCELIAM_OPERATOR_PROVIDER=spiffe</code> lets the operator fetch its own
+        JWT-SVID for AWS/GCP federation instead of using Keycloak for that part —
+        independent of how it still talks to Keycloak's Admin API for workload
+        provisioning. Two things have to exist first, and neither is something the
+        operator can set up for itself (same chicken-and-egg reasoning as the signed-JWT
+        credential above):
+      </p>
+      <ul class="limits">
+        <li>A <strong>separate</strong> AWS OIDC IdP + IAM role trust update (and/or GCP
+        WLI provider), trusting your SPIRE deployment's issuer for the operator's own
+        bootstrap identity specifically — distinct from whatever trust already exists
+        for individual namespace/SA federation.</li>
+        <li>A <strong>SPIRE registration entry for the operator's own pod</strong> —
+        without it, SPIRE has nothing to issue, and the fetch fails with
+        <code>PermissionDenied: no identity issued</code>.</li>
+      </ul>
+    </details>
+    <details style="margin-top:1rem;">
+      <summary>Advanced: use Auth0 for the operator's own identity instead of Keycloak</summary>
+      <p class="lede">
+        When Auth0 is active (<code>MYCELIAM_AUTH0_DOMAIN</code> set), the same
+        <code>myceliam-auth0-secret</code>/<code>myceliam-auth0-keypair</code> credential
+        plays both roles, same as Keycloak's: it calls the Management API to provision
+        workload Applications/Resource Servers/Client Grants/Actions, and
+        can also be exchanged for the operator's own AWS/GCP credentials. These are two
+        separate audiences on the same Auth0 Application, not two credentials: Management
+        API calls always target Auth0's fixed, reserved <code>https://{domain}/api/v2/</code>
+        audience, while the operator's own cloud-federation token targets
+        <code>MYCELIAM_AUTH0_OPERATOR_AUDIENCE</code> — a Resource Server the operator
+        provisions for itself the first time it's needed. Nothing to pre-create in the
+        Auth0 dashboard: just pick a unique identifier string and configure that same value
+        on whatever pre-existing AWS IAM OIDC IdP / GCP WLI provider is meant to trust the
+        operator's own bootstrap identity.
+      </p>
+      <p class="lede">
+        One accepted tradeoff worth knowing: since AWS keys its
+        <code>AssumeRoleWithWebIdentity</code> check off <code>azp</code> (the Auth0
+        Application's client_id) rather than <code>aud</code>, and <code>azp</code> is the
+        same for every token this one Application mints regardless of which audience was
+        requested, its Management API token is just as valid for
+        <code>AssumeRoleWithWebIdentity</code> as its cloud-federation token — the two
+        credentials aren't independently revocable. Only the operator pod ever holds this
+        credential, and compromising it already means full Auth0 tenant admin access
+        regardless of AWS, so the added blast radius is bounded rather than new.
+      </p>
+    </details>
+  </section>
+
+  <section class="container" id="limitations">
+    <h2>Known limitations</h2>
+    <ul class="limits">
+      <li>Cloud federation is registration and trust, not authorization — myceliam never
+      creates the policy binding that grants actual permissions. On AWS it <em>will</em>
+      create a referenced IAM Role outright if it's missing (trust policy only); on GCP it
+      never creates the target service account, only grants impersonation on one that
+      already exists.</li>
+      <li>AWS trust-policy documents have a hard 2048-character cap that AWS itself
+      won't raise. A role referenced by many namespaces/ServiceAccounts over time can
+      accumulate enough statements to hit it — nothing in myceliam prunes stale entries
+      automatically yet.</li>
+      <li>No proactive, expiry-based rotation for operator-generated <code>signedjwt</code>
+      certs — rotation only happens if you (or a tool like cert-manager) edit the cert
+      yourself, which the operator then picks up on its next reconcile.</li>
+      <li>A multi-value <code>aud</code> claim needs an <code>azp</code> claim or AWS
+      rejects the token outright — an AWS behavior, not a myceliam bug, but it's exactly
+      why SPIFFE-identified workloads fetch two tokens instead of one (see SPIFFE
+      above). More precisely: AWS checks <code>azp</code> against the IAM OIDC provider's
+      allowed-client list whenever <code>azp</code> is present, and never looks at
+      <code>aud</code> at all in that case — it only falls back to <code>aud</code> (and
+      enforces the single-value restriction) when <code>azp</code> is absent, as with
+      SPIFFE JWT-SVIDs.
+      <strong>The same <code>azp</code>-over-<code>aud</code> substitution also applies inside
+      a role's own trust-policy condition</strong> — its <code>:aud</code> policy-context key
+      resolves to <code>azp</code>'s value whenever the token carries one, confirmed live to
+      happen unconditionally, not only for the multi-valued-<code>aud</code> case above (a
+      clean single-string-<code>aud</code> Auth0 token still had <code>azp</code> substituted
+      in). Auth0's <code>azp</code> is its own dynamically-assigned client_id — unrelated to
+      both the configured audience and to <code>myceliam_service_account</code> — so
+      myceliam's trust-policy writer matches against both possible values rather than
+      assuming either shape upfront, while still separately requiring the identity claim
+      (<code>myceliam_service_account</code>, or <code>azp</code> for
+      Keycloak) to match too — this only widens which literal value <code>:aud</code> is
+      allowed to be, it doesn't weaken who's allowed to assume the role.</li>
+      <li><strong>AWS cannot use custom, dynamically-injected claims directly in IAM
+      trust-policy conditions</strong> — only native OIDC claims (<code>iss</code>/<code>sub</code>/
+      <code>aud</code>/<code>azp</code>) are usable there, confirmed empirically against a real
+      Auth0-issued token whose custom <code>myceliam_service_account</code> claim (added by
+      a tenant-wide Auth0 Action) a matching trust-policy condition never matched, even
+      though <code>sub</code>/<code>aud</code> conditions against the very same token worked
+      fine. GCP's Workload Identity Federation has no such restriction — an
+      <code>assertion.myceliam_service_account</code> attribute condition works there today
+      with no extra steps.
+      <strong>myceliam works around this automatically today</strong> via AWS's
+      session-tags-via-<code>AssumeRoleWithWebIdentity</code> feature (confirmed live end to
+      end, including an explicit <code>Deny</code> keyed on the tag actually blocking an
+      otherwise broadly-permitted call): the same tenant-wide Auth0 Action also emits a claim
+      named exactly <code>https://aws.amazon.com/tags</code> shaped as
+      <code>{"principal_tags": {"myceliam_service_account": ["sa1"], "myceliam_namespace":
+      ["ns1"], "myceliam_cluster_id": ["id1"], "myceliam_cloud": ["gcp,aws"]}}</code>
+      (each array must hold exactly one string; a genuine multi-element array makes AWS
+      reject the entire token outright with <code>InvalidIdentityToken</code>, confirmed
+      live, no graceful degradation or index selection). Whenever myceliam is handling a
+      provider whose identity claim needs this detour (Auth0 today), it automatically writes
+      <code>aws:RequestTag/myceliam_service_account</code> — not the non-working
+      <code>&lt;issuer&gt;:myceliam_service_account</code> form — directly in the trust
+      policy's own condition, gating the <code>AssumeRoleWithWebIdentity</code> call itself
+      (confirmed live both ways: a matching value succeeds, a mismatched one fails outright
+      with <code>AccessDenied</code>), and grants the required <code>sts:TagSession</code>
+      action alongside <code>sts:AssumeRoleWithWebIdentity</code>. This restores real per-SA
+      discrimination for AWS despite one shared Auth0 Application per namespace, with no
+      manual trust-policy authoring needed at all — myceliam creates the role itself (trust
+      policy only, no permissions attached) if it doesn't already exist, and still never
+      attaches or implies a permissions policy on it.</li>
+      <li>SPIFFE support assumes you've already stood up SPIRE yourself (server, agents,
+      <code>spire-controller-manager</code>, <code>spiffe-csi-driver</code>) — myceliam
+      only consumes an existing JWT-SVID issuer, it doesn't provision SPIRE.</li>
+      <li><strong>The operator must run as a single instance at all times, even during a
+      rolling deploy.</strong> It deliberately runs with no leader election (matching kopf's
+      <code>--standalone</code> mode), which is safe with one replica — <em>except</em>
+      Kubernetes' default Deployment strategy starts the new pod before stopping the old one,
+      so any redeploy briefly runs two uncoordinated operator processes reconciling the same
+      objects at once. Confirmed live: this raced Auth0's Application find-then-create check,
+      producing two duplicate Applications for the same ServiceAccount. Every shipped
+      Deployment manifest sets <code>strategy: {type: Recreate}</code> to close this — keep
+      it if you maintain your own copy.</li>
+    </ul>
+  </section>
+
+  <hr class="divider">
+
+  <section class="container" id="vision">
+    <h2>Where this is headed</h2>
+    <p class="lede">
+      Everything above describes what's implemented today: three identity sources in
+      (Keycloak, Auth0, SPIRE), two clouds out (AWS, GCP), with access expressed
+      entirely through <code>AwsAccessProfile</code>/<code>GcpAccessProfile</code>. The
+      point of the project is broader than either pairing, though: myceliam is meant to be an
+      <strong>orchestrator</strong> — a plug-in point where identity providers on one
+      side and cloud providers on the other can each grow independently, without either
+      side having to know about the other. myceliam doesn't issue or replace a workload's
+      identity, and that's staying fixed — it consumes an identity that already exists
+      and declaratively federates it outward, wherever that identity needs to reach.
+    </p>
+    <p class="lede" style="margin-top:1rem;">
+      That "wherever" matters more by the day. As AI agents increasingly run as
+      Kubernetes workloads in their own right, each one needs a real, governable identity
+      the moment it starts — not a shared static credential bolted on afterward.
+      myceliam's mechanism for this already works today, dynamically, against whichever
+      IdP is active (Keycloak or Auth0 now — Okta, Entra ID, or any other OIDC-compliant
+      IdP an organization already runs its human users through is the same kind of
+      pluggable addition as a new cloud provider, not a redesign). The natural extension
+      is applying the enterprise policies that IdP already enforces to agents just as
+      uniformly: not only for cloud IAM, but across SaaS and enterprise systems too —
+      Jira and the rest — since anything that speaks OIDC/OAuth can trust the identity
+      myceliam issues.
+    </p>
+    <p class="lede" style="margin-top:1rem;">
+      Authorization itself is deliberately not myceliam's problem to solve — each cloud
+      already has a mature, native answer to "what is this identity allowed to do": an
+      IAM role and its attached policies on AWS, a service account and its granted IAM
+      roles on GCP. myceliam's job stops at establishing <em>trust</em> with those
+      pre-existing resources — what an identity can actually do once federated is
+      entirely up to whatever policy is already attached on the cloud side. That's also
+      why a pluggable authorization-engine layer (OPA, OpenFGA, Cedar) isn't on this
+      roadmap: native cloud IAM already <em>is</em> that layer.
+    </p>
+    <p class="lede" style="margin-top:1rem;">
+      The relationship a workload has with the cloud side is already many-to-many in the
+      small — one ServiceAccount can federate into several AWS accounts <em>and</em>
+      several GCP projects at once, and several ServiceAccounts can share the same
+      target. The direction is to widen that same graph on both axes, not replace it.
+    </p>
+    <pre><code>SPIFFE JWT-SVID
+       │
+       ▼
+  payment-api
+       │
+       ├──── AWS Account A
+       ├──── AWS Account B
+       ├──── GCP Project X
+       ├──── Azure Tenant Y
+       └──── OCI Compartment Z</code></pre>
+    <p class="lede">
+      Identity providers already share one interface (<code>oidc.Provider</code>) that
+      Keycloak and Auth0 both implement — adding a new one is writing a new
+      implementation, not restructuring what's there. Cloud providers are parallel
+      packages today rather than a currently-unified interface; tightening that into the
+      same kind of pluggable shape as the identity side is part of the work ahead of
+      adding a third.
+    </p>
+    <div class="grid">
+      <div class="card">
+        <h3>Cloud providers</h3>
+        <p>Azure and Oracle Cloud Infrastructure (OCI), alongside AWS/GCP already
+        implemented.</p>
+      </div>
+      <div class="card">
+        <h3>SaaS &amp; enterprise app targets</h3>
+        <p>The same federated identity reaching beyond cloud IAM to any OIDC/OAuth-aware
+        SaaS or enterprise system — Jira and the rest — governed by the same enterprise
+        IdP policies already applied to human users.</p>
+      </div>
+    </div>
+    <p class="lede" style="margin-top:1.5rem;">
+      Neither list changes the shape of what's here already — access-profile CRDs stay
+      the interface, ServiceAccount labels stay how a workload opts in, and the reconcile
+      loop stays the mechanism. Growing either list is additive, not a redesign.
+    </p>
+  </section>
+
+</main>
+
+<footer>
+  <div class="container">
+    <div class="links">
+      <a href="https://github.com/myceliam-dev/myceliam" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/myceliam-dev/myceliam/issues" target="_blank" rel="noopener">Issues</a>
+      <a href="https://github.com/myceliam-dev/myceliam/blob/main/LICENSE" target="_blank" rel="noopener">License</a>
+    </div>
+    <div>myceliam &mdash; trust-only identity federation for Kubernetes</div>
+  </div>
+</footer>
+
+<script>
+(function() {
+  var canvas = document.getElementById('network');
+  var ctx = canvas.getContext('2d');
+  var W, H, nodes, dpr;
+  var colors = ['#d4a941', '#6b4fd6', '#e2732f'];
+
+  function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = W * dpr;
+    canvas.height = H * dpr;
+    canvas.style.width = W + 'px';
+    canvas.style.height = H + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    init();
+  }
+
+  function init() {
+    var count = Math.max(24, Math.min(60, Math.floor((W * H) / 34000)));
+    nodes = [];
+    for (var i = 0; i < count; i++) {
+      nodes.push({
+        x: Math.random() * W,
+        y: Math.random() * H,
+        vx: (Math.random() - 0.5) * 0.18,
+        vy: (Math.random() - 0.5) * 0.18,
+        r: Math.random() * 1.6 + 0.8,
+        color: colors[i % colors.length]
+      });
+    }
+  }
+
+  function step() {
+    ctx.clearRect(0, 0, W, H);
+    var maxDist = Math.min(160, W / 6);
+
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      n.x += n.vx;
+      n.y += n.vy;
+      if (n.x < 0 || n.x > W) n.vx *= -1;
+      if (n.y < 0 || n.y > H) n.vy *= -1;
+    }
+
+    for (var i = 0; i < nodes.length; i++) {
+      for (var j = i + 1; j < nodes.length; j++) {
+        var a = nodes[i], b = nodes[j];
+        var dx = a.x - b.x, dy = a.y - b.y;
+        var dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < maxDist) {
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.strokeStyle = a.color;
+          ctx.globalAlpha = (1 - dist / maxDist) * 0.35;
+          ctx.lineWidth = 0.6;
+          ctx.stroke();
+        }
+      }
+    }
+
+    ctx.globalAlpha = 1;
+    for (var i = 0; i < nodes.length; i++) {
+      var n = nodes[i];
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
+      ctx.fillStyle = n.color;
+      ctx.globalAlpha = 0.8;
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    requestAnimationFrame(step);
+  }
+
+  window.addEventListener('resize', resize);
+  resize();
+  requestAnimationFrame(step);
+})();
+</script>
+
+</body>
+</html>

@@ -86,7 +86,7 @@ func (r *ServiceAccountReconciler) reconcile(ctx context.Context, sa *corev1.Ser
 			// The issuer itself changed (or was removed): every profile
 			// registered under the old issuer is now orphaned there
 			// regardless of whether its own label changed too.
-			staleSpecs, _ = cloudmodels.ParseCloudFederationSpecs(namespace, name, oldLabels, oldAnnotations, r.Deps.Settings)
+			staleSpecs, _ = cloudmodels.ParseCloudFederationSpecs(namespace, name, oldLabels, oldAnnotations, "", r.Deps.Settings)
 		}
 		if len(staleSpecs) > 0 {
 			if err := cleanupSpiffeSpecs(ctx, r.Deps, namespace, name, staleSpecs, oldJWTIssuer, oldAnnotations[models.SpiffeIDAnnotation]); err != nil {
@@ -110,7 +110,7 @@ func (r *ServiceAccountReconciler) reconcile(ctx context.Context, sa *corev1.Ser
 
 	removed := removedSpecs(namespace, name, oldLabels, oldAnnotations, labels, annotations, r.Deps)
 	if len(removed) > 0 {
-		return cleanupCloud(ctx, r.Deps, namespace, name, removed)
+		return cleanupCloud(ctx, r.Deps, namespace, name, labels, removed)
 	}
 	return nil
 }
@@ -124,7 +124,7 @@ func (r *ServiceAccountReconciler) cleanup(ctx context.Context, sa *corev1.Servi
 		return cleanupSpiffe(ctx, r.Deps, namespace, name, labels, annotations)
 	}
 
-	oidcProvider, err := requireOIDC(r.Deps, namespace, name)
+	providerName, oidcProvider, err := requireOIDC(r.Deps, namespace, name, labels)
 	if err != nil {
 		return err
 	}
@@ -134,8 +134,8 @@ func (r *ServiceAccountReconciler) cleanup(ctx context.Context, sa *corev1.Servi
 	// A parse error here (e.g. a profile label with no paired role
 	// annotation) shouldn't block deletion — best-effort teardown of
 	// whatever we can still identify, same reasoning as cleanupSpiffe.
-	specs, _ := cloudmodels.ParseCloudFederationSpecs(namespace, name, labels, annotations, r.Deps.Settings)
-	return cleanupCloud(ctx, r.Deps, namespace, name, specs)
+	specs, _ := cloudmodels.ParseCloudFederationSpecs(namespace, name, labels, annotations, providerName, r.Deps.Settings)
+	return cleanupCloud(ctx, r.Deps, namespace, name, labels, specs)
 }
 
 func (r *ServiceAccountReconciler) SetupWithManager(mgr ctrl.Manager) error {

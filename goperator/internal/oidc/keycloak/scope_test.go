@@ -115,7 +115,7 @@ func TestProviderEnsureAccessScopeDelegates(t *testing.T) {
 	p, admin := testProvider(t)
 	admin.clientIDs["demo"] = map[string]string{"my-app": "client-id-1"}
 
-	if err := p.EnsureAccessScope(context.Background(), "demo", "my-app", "ap1-my-app", "sts.amazonaws.com"); err != nil {
+	if _, err := p.EnsureAccessScope(context.Background(), "demo", "my-app", "ap1-my-app", "sts.amazonaws.com"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if admin.createScopeCalls != 1 {
@@ -127,7 +127,7 @@ func TestProviderDeleteAccessScopeDelegates(t *testing.T) {
 	p, admin := testProvider(t)
 	admin.scopeIDs["demo"] = map[string]string{"ap1-my-app": "scope-id-1"}
 
-	if err := p.DeleteAccessScope(context.Background(), "demo", "ap1-my-app"); err != nil {
+	if err := p.DeleteAccessScope(context.Background(), "demo", "my-app", "ap1-my-app"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if admin.deleteScopeCalls != 1 {
