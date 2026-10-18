@@ -66,11 +66,29 @@ func (r *AwsAccessProfileReconciler) Reconcile(ctx context.Context, req ctrl.Req
 }
 
 // cleanup is handlers.py's cleanup_aws_access_profile: deregisters the IAM
-// OIDC provider in every account this profile listed. No-op when
-// Deps.OIDC is nil (MYCELIAM_OIDC_PROVIDER=none) — this only ever cleans up
-// the Keycloak-realm-issuer IdP; a spiffe-only deployment never registered
-// one in the first place (spiffe federation goes through cleanupSpiffeSpecs
-// instead, entirely independent of Deps.OIDC).
+// OIDC provider in every account this profile listed. No-op when no OIDC
+// provider is active at all — this only ever cleans up a Keycloak/Auth0
+// realm-issuer IdP; a spiffe-only deployment never registered one in the
+// first place (spiffe federation goes through cleanupSpiffeSpecs instead).
+//
+// By the time a profile has no referencing ServiceAccount left, there's no
+// remaining signal for which OF the operator's (possibly several) active
+// providers ever backed one — so this tries every active provider's own
+// issuer URL for this namespace, not just one. DeleteIdp is a no-op for an
+// issuer that was never actually registered (same idempotent-by-design
+// pattern every other IdP-deletion call in this codebase follows), so
+// harmlessly attempting issuers that were never used here costs nothing.
+//
+// Providers whose issuer isn't namespace-exclusive
+// (cloudmodels.IssuerSharedAcrossNamespaces — Auth0) are skipped entirely
+// here: this profile's own namespace never "owns" that shared IdP, only the
+// individual ServiceAccounts that registered entries in its ClientIDList do
+// (cleanupCloud, per-SA, via RemoveAudience) — confirmed live that calling
+// DeleteIdp here for Auth0 deleted the tenant-wide provider out from under
+// every other namespace on that tenant (and the operator's own bootstrap
+// trust) the moment just this one profile went away. For the providers this
+// still applies to, operatorClientIdentifiers is passed as a second line of
+// defense against deleting the operator's own bootstrap identity too.
 //
 // Deliberately doesn't also strip each listed role's individual trust-policy
 // statements here — that's cleanupCloud/cleanupSpiffeSpecs's job, fired
@@ -80,20 +98,33 @@ func (r *AwsAccessProfileReconciler) Reconcile(ctx context.Context, req ctrl.Req
 // anyway (its Federated principal ARN no longer resolves to anything), so
 // this is a cleanliness gap, not a security one.
 func (r *AwsAccessProfileReconciler) cleanup(ctx context.Context, profile *myceliamv1.AwsAccessProfile) error {
-	if r.Deps.OIDC == nil {
-		return nil
+	type target struct {
+		issuerURL    string
+		protectedIDs []string
 	}
-	issuerURL, err := r.Deps.OIDC.IssuerURL(models.RealmForNamespace(profile.Namespace, r.Deps.Settings))
-	if err != nil {
-		return err
-	}
-	for accountID := range profile.Accounts {
-		creds, err := operatoridentity.GetAWSCredentials(ctx, r.Deps.Settings, accountID, r.Deps.OIDC)
+	targets := make(map[string]target, len(r.Deps.OIDCProviders))
+	for providerName, p := range r.Deps.OIDCProviders {
+		if cloudmodels.IssuerSharedAcrossNamespaces(providerName) {
+			continue
+		}
+		issuerURL, err := p.IssuerURL(models.RealmForNamespace(profile.Namespace, r.Deps.Settings))
 		if err != nil {
 			return err
 		}
-		if err := cloudaws.DeleteIdp(ctx, accountID, issuerURL, creds); err != nil {
+		targets[issuerURL] = target{issuerURL: issuerURL, protectedIDs: operatorClientIdentifiers(r.Deps, providerName)}
+	}
+	if len(targets) == 0 {
+		return nil
+	}
+	for accountID := range profile.Accounts {
+		creds, err := operatoridentity.GetAWSCredentials(ctx, r.Deps.Settings, accountID, r.Deps.OperatorOIDC)
+		if err != nil {
 			return err
+		}
+		for _, t := range targets {
+			if err := cloudaws.DeleteIdp(ctx, accountID, t.issuerURL, t.protectedIDs, creds); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

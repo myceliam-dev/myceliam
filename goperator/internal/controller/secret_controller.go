@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -16,11 +15,11 @@ import (
 )
 
 // SecretReconciler ports handlers.py's reconcile_credentials_secret: cert
-// rotation for signedjwt clients. If <sa-name>-oidc-credentials' tls.crt is
-// edited (rotated), re-derive the JWKS and re-upload it. This same secret
-// name is also used for clienttype=secret's own output, so this no-ops for
-// those — it also fires (harmlessly) from the operator's own periodic writes
-// to that secret.
+// rotation for signedjwt clients. If a signedjwt client's credentials
+// Secret's tls.crt is edited (rotated), re-derive the JWKS and re-upload it.
+// The same watch also covers clienttype=secret's own output and signedjwt's
+// metadata companion secret, so this no-ops for those — it also fires
+// (harmlessly) from the operator's own periodic writes to any of them.
 //
 // No finalizer: unlike ServiceAccount/Namespace/AccessProfile, this handler
 // has no delete-time cleanup of its own (kopf's original is an
@@ -29,8 +28,25 @@ type SecretReconciler struct {
 	Deps *Deps
 }
 
+// owningSAName reads models.ServiceAccountAnnotation directly rather than
+// parsing it back out of the secret's own name — necessary now that naming
+// is a compound, provider/clienttype-varying string
+// (models.credentialsSecretNames) rather than one fixed suffix a single
+// strings.TrimSuffix could reverse.
+func owningSAName(secret *corev1.Secret) (string, bool) {
+	name, ok := secret.Annotations[models.ServiceAccountAnnotation]
+	return name, ok && name != ""
+}
+
 func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	saName, ok := owningSAName(req.Name, r.Deps)
+	var secret corev1.Secret
+	if err := r.Deps.Client.Get(ctx, req.NamespacedName, &secret); err != nil {
+		if apierrors.IsNotFound(err) {
+			return ctrl.Result{}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	saName, ok := owningSAName(&secret)
 	if !ok {
 		return ctrl.Result{}, nil
 	}
@@ -53,10 +69,10 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 }
 
 func (r *SecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	suffix := r.Deps.Settings.CredentialsSecretSuffix
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Secret{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(obj client.Object) bool {
-			return strings.HasSuffix(obj.GetName(), suffix)
+			_, ok := owningSAName(obj.(*corev1.Secret))
+			return ok
 		}))).
 		Complete(r)
 }

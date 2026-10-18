@@ -6,6 +6,15 @@ metadata:
   namespace: myceliam-system
 spec:
   replicas: 1
+  # The operator runs with no leader election (single-instance, matching
+  # kopf's --standalone mode) — Kubernetes' default RollingUpdate strategy
+  # briefly runs the old and new pod together on every redeploy, and two
+  # uncoordinated operator processes reconciling the same objects at once
+  # can race (confirmed live: produced two duplicate Auth0 Applications for
+  # the same ServiceAccount). Recreate guarantees the old pod fully stops
+  # before the new one starts.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: myceliam-operator
@@ -22,11 +31,11 @@ spec:
           env:
             - name: MYCELIAM_CLUSTER_ID
               value: <>
-            # Still required: MYCELIAM_OIDC_PROVIDER defaults to "keycloak",
-            # so the operator still needs Keycloak for the Admin REST API
-            # (provisioning any clienttype=secret/signedjwt workload
-            # ServiceAccounts) — apply oidc-client-secret.yaml or
-            # oidc-tls-secret.yaml from ../oidc/ for this same client
+            # Still required: setting MYCELIAM_KEYCLOAK_URL makes Keycloak an
+            # active workload provider, so the operator can still use it for
+            # the Admin REST API (provisioning any clienttype=secret/signedjwt
+            # workload ServiceAccounts) — apply keycloak-client-secret.yaml or
+            # keycloak-tls-secret.yaml from ../keycloak/ for this same client
             # regardless. Only the operator's OWN AWS/GCP federation token
             # (below) comes from SPIRE instead.
             - name: MYCELIAM_KEYCLOAK_URL
@@ -37,15 +46,16 @@ spec:
               value: "myceliam-operator-tls"
             - name: MYCELIAM_KEYCLOAK_OPERATOR_SCOPE
               value: <>
-            # Independent of MYCELIAM_OIDC_PROVIDER above — this only picks
-            # where the operator's OWN cloud-federation token comes from.
-            # Requires a SPIRE registration entry for the operator's own pod
-            # (see operator-clusterspiffeid.yaml) and a separate, pre-existing
-            # AWS/GCP bootstrap trust for this specific SPIFFE identity —
-            # distinct from whatever trust already exists for individual
-            # namespace/SA federation, and from the Keycloak-based bootstrap
-            # trust oidc-operator.yaml would use instead.
-            - name: MYCELIAM_OPERATOR_IDENTITY_SOURCE
+            # Independent of which workload provider(s) are active above —
+            # this only picks where the operator's OWN cloud-federation token
+            # comes from. Requires a SPIRE registration entry for the
+            # operator's own pod (see operator-clusterspiffeid.yaml) and a
+            # separate, pre-existing AWS/GCP bootstrap trust for this specific
+            # SPIFFE identity — distinct from whatever trust already exists
+            # for individual namespace/SA federation, and from the
+            # Keycloak-based bootstrap trust keycloak-operator.yaml would use
+            # instead.
+            - name: MYCELIAM_OPERATOR_PROVIDER
               value: "spiffe"
             - name: MYCELIAM_OPERATOR_SPIFFE_AUDIENCE
               value: <>

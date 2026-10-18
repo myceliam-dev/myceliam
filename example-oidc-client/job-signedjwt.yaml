@@ -14,12 +14,18 @@ spec:
           image: example-oidc-client:test
           imagePullPolicy: Never
           env:
-            # Not secret — the client-id is just this ServiceAccount's own
-            # name (spec.ClientName). Unlike clienttype=secret, a signedjwt
-            # client's credentials secret carries only tls.crt/tls.key, no
-            # client_id/issuer keys — see reconcile.go's reconcileClient.
+            # A signedjwt client's credentials secret carries only
+            # tls.crt/tls.key (see reconcile.go's reconcileClient) — client_id
+            # (and, for Auth0, kid) live in the companion metadata secret
+            # instead. For Keycloak client_id happens to just be this
+            # ServiceAccount's own name (spec.ClientName), but reading it from
+            # the metadata secret establishes the same pattern Auth0's
+            # signedjwt job needs, where it can't be hardcoded/assumed.
             - name: KEYCLOAK_CLIENT_ID
-              value: "portobello-jwt"
+              valueFrom:
+                secretKeyRef:
+                  name: portobello-jwt-jwt-keycloak-metadata
+                  key: client_id
             # {MYCELIAM_KEYCLOAK_URL}/realms/{ClusterID}-{namespace} — same
             # construction as IssuerURL, just not readable from a secret key
             # here, so it's spelled out directly.
@@ -33,7 +39,7 @@ spec:
             # and clienttype=signedjwt both fall under GCP's KindOIDC, one
             # shared provider per namespace regardless of which SA is asking.
             - name: GCP_STS_AUDIENCE
-              value: "//iam.googleapis.com/projects/<gcp-project-number>/locations/global/workloadIdentityPools/myceliam-operator/providers/demo-portobello-oidc"
+              value: "//iam.googleapis.com/projects/<gcp-project-number>/locations/global/workloadIdentityPools/myceliam-operator/providers/demo-portobello-keycloak"
           volumeMounts:
             - name: creds
               mountPath: /creds
@@ -41,4 +47,4 @@ spec:
       volumes:
         - name: creds
           secret:
-            secretName: portobello-jwt-oidc-credentials
+            secretName: portobello-jwt-jwt-keycloak-credentials

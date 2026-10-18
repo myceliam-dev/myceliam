@@ -1,0 +1,56 @@
+---
+# Auth0 counterpart to resources.yaml — requires the operator itself to be
+# deployed with Auth0 active (MYCELIAM_AUTH0_DOMAIN +
+# MYCELIAM_AUTH0_OPERATOR_CLIENT_ID set, see ../deploy-operator/auth0/). If
+# the operator also has Keycloak active at the same time (e.g.
+# ../deploy-operator/combined/), add myceliam.io/oidc-provider: "auth0" to
+# each ServiceAccount below to disambiguate from resources.yaml's
+# Keycloak-flavored ones — see goperator/README.md's "How it works" section.
+# Omit the label if Auth0 is the operator's only active provider.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: shiitake
+---
+apiVersion: myceliam.io/v1
+kind: AwsAccessProfile
+metadata:
+  name: awsap-shiitake
+  namespace: shiitake
+accounts:
+  "344256006574":
+    - roleA
+    - roleB
+---
+apiVersion: myceliam.io/v1
+kind: GcpAccessProfile
+metadata:
+  name: gcpap-shiitake
+  namespace: shiitake
+projects:
+  "project-2f046078-45a1-49af-ac9":
+    - "operator@project-2f046078-45a1-49af-ac9.iam.gserviceaccount.com"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: shiitake
+  name: sa-auth0-secret
+  labels:
+    myceliam.io/autoidp: "true"
+    myceliam.io/client-type: "secret"
+    myceliam.io/oidc-provider: "auth0"
+    myceliam.io/aws-access-profile: "awsap-shiitake"
+    myceliam.io/gcp-access-profile: "gcpap-shiitake"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  namespace: shiitake
+  name: sa-auth0-signedjwt
+  labels:
+    myceliam.io/autoidp: "true"
+    myceliam.io/client-type: "signedjwt"
+    myceliam.io/oidc-provider: "auth0"
+    myceliam.io/aws-access-profile: "awsap-shiitake"
+    myceliam.io/gcp-access-profile: "gcpap-shiitake"

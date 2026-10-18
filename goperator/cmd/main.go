@@ -64,12 +64,20 @@ func main() {
 	}
 
 	// Built once at startup, same as kopf's @kopf.on.startup handler building
-	// memo.oidc — a nil oidcProvider (settings.OidcProvider == "none") is a
-	// valid, deliberate configuration for spiffe-only deployments, not an error.
-	oidcProvider, err := oidc.GetProvider(ctx, settings, bootstrapClient)
+	// memo.oidc — one instance per settings.ActiveProviders(), an empty map
+	// being a valid, deliberate configuration for spiffe-only deployments,
+	// not an error.
+	oidcProviders, err := oidc.GetProviders(ctx, settings, bootstrapClient)
 	if err != nil {
-		logger.Error(err, "failed to build OIDC provider")
+		logger.Error(err, "failed to build OIDC providers")
 		os.Exit(1)
+	}
+	// The operator's own identity is always one of "spiffe" (no instance
+	// needed) or a provider name settings.validateProviderConfig() already
+	// guaranteed is a key in oidcProviders — this lookup cannot miss.
+	var operatorOIDC oidc.Provider
+	if settings.OperatorProvider != "spiffe" {
+		operatorOIDC = oidcProviders[settings.OperatorProvider]
 	}
 
 	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{Scheme: scheme})
@@ -79,9 +87,10 @@ func main() {
 	}
 
 	deps := &controller.Deps{
-		Client:   mgr.GetClient(),
-		Settings: settings,
-		OIDC:     oidcProvider,
+		Client:        mgr.GetClient(),
+		Settings:      settings,
+		OIDCProviders: oidcProviders,
+		OperatorOIDC:  operatorOIDC,
 	}
 
 	reconcilers := []setupable{

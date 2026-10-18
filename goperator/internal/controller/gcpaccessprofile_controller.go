@@ -50,7 +50,7 @@ func (r *GcpAccessProfileReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	}
 
 	for projectID := range profile.Projects {
-		if err := cloudgcp.EnsurePool(ctx, projectID, r.Deps.Settings, r.Deps.OIDC); err != nil {
+		if err := cloudgcp.EnsurePool(ctx, projectID, r.Deps.Settings, r.Deps.OperatorOIDC); err != nil {
 			return classify(ctx, err, 0)
 		}
 	}
@@ -63,14 +63,21 @@ func (r *GcpAccessProfileReconciler) Reconcile(ctx context.Context, req ctrl.Req
 // Leaves the shared pool itself in place — it's shared across every
 // namespace targeting the same project, not owned by this one profile.
 //
-// Deletes both the KindOIDC and KindSpiffe provider unconditionally rather
-// than figuring out which kind(s) the namespace actually used — DeleteIdp
-// already no-ops on 404, and by CR-delete time there's no reliable way to
-// tell which kinds ever existed short of tracking it separately.
+// Deletes the KindSpiffe provider and, for every active workload OIDC
+// provider (keycloak/auth0), its own KindOIDC provider — since
+// providerID folds the workload provider name into KindOIDC's provider ID
+// (see its own doc comment), there's one such provider per active provider,
+// not one shared "-oidc" provider. Deletes all of these unconditionally
+// rather than figuring out which ones the namespace actually used —
+// DeleteIdp already no-ops on 404, and by CR-delete time there's no
+// reliable way to tell which ever existed short of tracking it separately.
 func (r *GcpAccessProfileReconciler) cleanup(ctx context.Context, profile *myceliamv1.GcpAccessProfile) error {
 	for projectID := range profile.Projects {
-		for _, kind := range []string{cloudgcp.KindOIDC, cloudgcp.KindSpiffe} {
-			if err := cloudgcp.DeleteIdp(ctx, projectID, profile.Namespace, r.Deps.Settings, kind, r.Deps.OIDC); err != nil {
+		if err := cloudgcp.DeleteIdp(ctx, projectID, profile.Namespace, r.Deps.Settings, cloudgcp.KindSpiffe, "", r.Deps.OperatorOIDC); err != nil {
+			return err
+		}
+		for providerName := range r.Deps.OIDCProviders {
+			if err := cloudgcp.DeleteIdp(ctx, projectID, profile.Namespace, r.Deps.Settings, cloudgcp.KindOIDC, providerName, r.Deps.OperatorOIDC); err != nil {
 				return err
 			}
 		}

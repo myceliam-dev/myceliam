@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: demo-listbuckets-signedjwt
+  namespace: portobello
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      serviceAccountName: auth0-jwt
+      restartPolicy: Never
+      containers:
+        - name: demo-listbuckets-oidc
+          image: example-oidc:v1.2
+          imagePullPolicy: Never
+          env:
+            - name: AUTH0_DOMAIN
+              value: "dev-ngyf2gzgiq5odql1.us.auth0.com"
+            # Unlike Keycloak, Auth0 assigns its own client_id and kid — both
+            # must come from the metadata secret the operator wrote, never
+            # hardcoded/derived (see internal/oidc/auth0's package doc
+            # comment on why Auth0 needs this extra secret Keycloak
+            # doesn't).
+            - name: AUTH0_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: auth0-jwt-jwt-auth0-metadata
+                  key: client_id
+            - name: AUTH0_KID
+              valueFrom:
+                secretKeyRef:
+                  name: auth0-jwt-jwt-auth0-metadata
+                  key: kid
+            - name: AUTH0_TLS_CERT_PATH
+              value: "/creds/tls.crt"
+            - name: AUTH0_TLS_KEY_PATH
+              value: "/creds/tls.key"
+            # See job-auth0-secret.yaml for these — same convention, shared
+            # by every SA in this namespace regardless of client type.
+            - name: AWS_AUTH0_AUDIENCE
+              value: "aws-demo-portobello" 
+            - name: GCP_AUTH0_AUDIENCE
+              value: "gcp-demo-portobello"
+            - name: GCP_STS_AUDIENCE
+              value: "//iam.googleapis.com/projects/315798566630/locations/global/workloadIdentityPools/myceliam-operator/providers/demo-portobello-auth0"
+          volumeMounts:
+            - name: creds
+              mountPath: /creds
+              readOnly: true
+      volumes:
+        - name: creds
+          secret:
+            secretName: auth0-jwt-jwt-auth0-credentials

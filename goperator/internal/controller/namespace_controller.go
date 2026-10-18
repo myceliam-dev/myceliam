@@ -11,19 +11,27 @@ import (
 	"myceliam/internal/models"
 )
 
-// NamespaceReconciler ports handlers.py's cleanup_namespace: tears down the
-// namespace's whole Keycloak realm once the namespace itself is deleted —
-// unlike a single ServiceAccount going away, nothing can ever reference this
-// realm again, so there's no "other SAs might still need it" reason to leave
-// it behind.
+// NamespaceReconciler ports handlers.py's cleanup_namespace: tears down
+// every namespace-scoped OIDC resource once the namespace itself is deleted
+// — unlike a single ServiceAccount going away, nothing can ever reference
+// any of it again, so there's no "other SAs might still need it" reason to
+// leave it behind. For Keycloak that's the whole realm (one call, cascades);
+// for Auth0, which has no such single container, DeleteTenant instead
+// force-sweeps the two shared per-(cloud,namespace) Resource Servers
+// directly — see its own DeleteTenant doc comment for why that sweep exists
+// at all (confirmed live: without it, a Resource Server can outlive every
+// ServiceAccount that ever referenced it).
 //
 // This watches (and adds its finalizer to) every namespace in the cluster,
 // not just ones with myceliam ServiceAccounts — the same unfiltered
 // @kopf.on.delete("", "v1", "namespaces") behavior the Python original
-// already has. No-op if the namespace never had a realm (DeleteTenant is a
-// no-op if the realm doesn't exist), and a further no-op entirely when
-// Deps.OIDC is nil (MYCELIAM_OIDC_PROVIDER=none) since a spiffe-only
-// deployment never registers a realm to begin with.
+// already has. By namespace-delete time there's no reliable way to tell
+// which of the operator's (possibly several) active providers ever backed a
+// realm/tenant here, so DeleteTenant is called on every one of them — each
+// is documented as a no-op if it finds nothing to delete, so calling all of
+// them costs nothing for the ones that were never used. A further no-op
+// entirely when no OIDC provider is active at all (a spiffe-only deployment
+// never registers a realm/tenant to begin with).
 type NamespaceReconciler struct {
 	Deps *Deps
 }
@@ -41,8 +49,8 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		if !controllerutil.ContainsFinalizer(&ns, finalizerName) {
 			return ctrl.Result{}, nil
 		}
-		if r.Deps.OIDC != nil {
-			if err := r.Deps.OIDC.DeleteTenant(ctx, models.RealmForNamespace(ns.Name, r.Deps.Settings)); err != nil {
+		for _, p := range r.Deps.OIDCProviders {
+			if err := p.DeleteTenant(ctx, models.RealmForNamespace(ns.Name, r.Deps.Settings)); err != nil {
 				return classify(ctx, err, 0)
 			}
 		}

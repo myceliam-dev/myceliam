@@ -1,5 +1,5 @@
 # Registers the myceliam-operator's own pod for a SPIFFE identity — needed
-# only when MYCELIAM_OPERATOR_IDENTITY_SOURCE=spiffe. Without this, SPIRE has
+# only when MYCELIAM_OPERATOR_PROVIDER=spiffe. Without this, SPIRE has
 # no registration entry whose selectors match the operator's pod, so its own
 # FetchJWTSVID call fails with "PermissionDenied: no identity issued" (unlike
 # workload ServiceAccounts, the operator's own identity isn't something

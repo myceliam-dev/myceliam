@@ -238,12 +238,15 @@ func TestEnsureSignedjwtClientSetsJwksAttributes(t *testing.T) {
 		CredentialsSecretName: "my-app-oidc-credentials",
 	}
 
-	clientID, err := p.EnsureSignedjwtClient(context.Background(), spec, `{"keys": []}`)
+	clientID, actualKid, err := p.EnsureSignedjwtClient(context.Background(), spec, nil, `{"keys": []}`, "hint-kid")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if clientID != "my-app" {
 		t.Fatalf("unexpected clientID: %q", clientID)
+	}
+	if actualKid != "hint-kid" {
+		t.Fatalf("expected keycloak to echo the kid hint back unchanged, got %q", actualKid)
 	}
 	payload := admin.lastCreateClientPayload
 	if payload.ClientAuthenticatorType != "client-jwt" {

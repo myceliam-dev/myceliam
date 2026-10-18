@@ -22,7 +22,7 @@ func settings(t *testing.T, overrides map[string]string) *config.Settings {
 }
 
 func TestNoLabelsYieldsNoSpecs(t *testing.T) {
-	specs, err := ParseCloudFederationSpecs("ns1", "my-app", map[string]string{}, map[string]string{}, settings(t, nil))
+	specs, err := ParseCloudFederationSpecs("ns1", "my-app", map[string]string{}, map[string]string{}, "keycloak", settings(t, nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestNoLabelsYieldsNoSpecs(t *testing.T) {
 
 func TestAwsOnly(t *testing.T) {
 	labels := map[string]string{AwsProfileLabel: "ap1"}
-	specs, err := ParseCloudFederationSpecs("ns1", "my-app", labels, map[string]string{}, settings(t, nil))
+	specs, err := ParseCloudFederationSpecs("ns1", "my-app", labels, map[string]string{}, "keycloak", settings(t, nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -51,7 +51,7 @@ func TestAwsOnly(t *testing.T) {
 
 func TestGcpOnly(t *testing.T) {
 	labels := map[string]string{GcpProfileLabel: "ap2"}
-	specs, err := ParseCloudFederationSpecs("ns1", "my-app", labels, map[string]string{}, settings(t, nil))
+	specs, err := ParseCloudFederationSpecs("ns1", "my-app", labels, map[string]string{}, "keycloak", settings(t, nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestBothAwsAndGcp(t *testing.T) {
 		AwsProfileLabel: "ap1",
 		GcpProfileLabel: "ap2",
 	}
-	specs, err := ParseCloudFederationSpecs("ns1", "my-app", labels, map[string]string{}, settings(t, nil))
+	specs, err := ParseCloudFederationSpecs("ns1", "my-app", labels, map[string]string{}, "keycloak", settings(t, nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestIgnoresUnrelatedLabels(t *testing.T) {
 		models.AutoidpLabel:    "true",
 		models.ClientTypeLabel: "secret",
 	}
-	specs, err := ParseCloudFederationSpecs("ns1", "my-app", labels, map[string]string{}, settings(t, nil))
+	specs, err := ParseCloudFederationSpecs("ns1", "my-app", labels, map[string]string{}, "keycloak", settings(t, nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -115,11 +115,11 @@ func TestIgnoresUnrelatedLabels(t *testing.T) {
 
 func TestAwsAudienceIsUniquePerServiceAccount(t *testing.T) {
 	labels := map[string]string{AwsProfileLabel: "ap1"}
-	specsA, err := ParseCloudFederationSpecs("ns1", "sa-a", labels, map[string]string{}, settings(t, nil))
+	specsA, err := ParseCloudFederationSpecs("ns1", "sa-a", labels, map[string]string{}, "keycloak", settings(t, nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	specsB, err := ParseCloudFederationSpecs("ns1", "sa-b", labels, map[string]string{}, settings(t, nil))
+	specsB, err := ParseCloudFederationSpecs("ns1", "sa-b", labels, map[string]string{}, "keycloak", settings(t, nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -130,15 +130,88 @@ func TestAwsAudienceIsUniquePerServiceAccount(t *testing.T) {
 
 func TestGcpAudienceIsSharedAcrossServiceAccountsInANamespace(t *testing.T) {
 	labels := map[string]string{GcpProfileLabel: "ap1"}
-	specsA, err := ParseCloudFederationSpecs("ns1", "sa-a", labels, map[string]string{}, settings(t, nil))
+	specsA, err := ParseCloudFederationSpecs("ns1", "sa-a", labels, map[string]string{}, "keycloak", settings(t, nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	specsB, err := ParseCloudFederationSpecs("ns1", "sa-b", labels, map[string]string{}, settings(t, nil))
+	specsB, err := ParseCloudFederationSpecs("ns1", "sa-b", labels, map[string]string{}, "keycloak", settings(t, nil))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if specsA[0].Audience != specsB[0].Audience {
 		t.Fatalf("expected different SAs in the same namespace to share the gcp audience, got %v and %v", specsA[0].Audience, specsB[0].Audience)
+	}
+}
+
+func TestOidcSubjectClaimDefaultsToAzpForKeycloak(t *testing.T) {
+	if got := OidcSubjectClaim("keycloak"); got != "azp" {
+		t.Fatalf("expected 'azp' for keycloak, got %q", got)
+	}
+}
+
+// auth0Settings returns Settings with Auth0 active alongside the base
+// Keycloak config (settings() always sets MYCELIAM_KEYCLOAK_URL) — both
+// active at once requires an explicit MYCELIAM_OPERATOR_PROVIDER, same as
+// any other multi-provider deployment.
+func auth0Settings(t *testing.T) *config.Settings {
+	t.Helper()
+	return settings(t, map[string]string{
+		"AUTH0_DOMAIN":             "example.us.auth0.com",
+		"AUTH0_OPERATOR_CLIENT_ID": "operator-client-id",
+		"OPERATOR_PROVIDER":        "keycloak",
+	})
+}
+
+func TestOidcSubjectClaimIsNamespacedClaimForAuth0(t *testing.T) {
+	// Auth0 has no custom client_id (confirmed empirically against a live
+	// tenant), so unlike Keycloak's azp its own identity claims aren't
+	// predictable until after the Application is created. myceliam
+	// self-issues this claim instead via a tenant-wide Action — see
+	// internal/oidc/auth0's package doc comment.
+	if got := OidcSubjectClaim("auth0"); got != Auth0ServiceAccountClaim {
+		t.Fatalf("expected %q for auth0, got %q", Auth0ServiceAccountClaim, got)
+	}
+}
+
+func TestAuth0AudienceIsNamespaceSharedAndFoldsClusterID(t *testing.T) {
+	s := auth0Settings(t)
+	labels := map[string]string{AwsProfileLabel: "ap1"}
+
+	specsA, err := ParseCloudFederationSpecs("ns1", "sa-a", labels, map[string]string{}, "auth0", s)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	specsB, err := ParseCloudFederationSpecs("ns1", "sa-b", labels, map[string]string{}, "auth0", s)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	spec := specsA[0]
+	if spec.Audience != "aws-test-cluster-ns1" {
+		t.Fatalf("expected cluster-id-folded namespace-shared audience 'aws-test-cluster-ns1', got %q", spec.Audience)
+	}
+	if !spec.SharedAudience {
+		t.Fatalf("expected SharedAudience=true under auth0, even for aws")
+	}
+	if spec.SubjectClaim != Auth0ServiceAccountClaim {
+		t.Fatalf("expected SubjectClaim=%q under auth0, got %q", Auth0ServiceAccountClaim, spec.SubjectClaim)
+	}
+	// Confirmed live: a StringEquals condition on
+	// "<issuer>:myceliam_service_account" never matches, so this must be
+	// true to make cloudaws.EnsureRoleTrust use the aws:RequestTag/
+	// session-tags detour instead — see CloudFederationSpec's own doc
+	// comment on SubjectClaimViaSessionTag.
+	if !spec.SubjectClaimViaSessionTag {
+		t.Fatalf("expected SubjectClaimViaSessionTag=true under auth0")
+	}
+	// Confirmed live: Auth0's issuer is the tenant's fixed domain, shared by
+	// every namespace/cluster on that tenant (and the operator's own
+	// bootstrap identity) — cleanupCloud must never fully delete this IdP
+	// from one namespace's perspective. See IssuerShared's own doc comment.
+	if !spec.IssuerShared {
+		t.Fatalf("expected IssuerShared=true under auth0")
+	}
+	if specsA[0].Audience != specsB[0].Audience {
+		t.Fatalf("expected different SAs to share the same auth0 aws audience, got %v and %v", specsA[0].Audience, specsB[0].Audience)
 	}
 }

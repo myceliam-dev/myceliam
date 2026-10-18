@@ -48,7 +48,19 @@ func newFakeGCPServer(t *testing.T) *fakeGCPServer {
 
 func (f *fakeGCPServer) start() *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/protocol/openid-connect/certs") {
+		// fetchJWKS does real OIDC discovery now (not a hardcoded path) —
+		// serve the standard two-hop shape: .../.well-known/openid-configuration
+		// pointing at .../.well-known/jwks.json, both under whatever
+		// issuer path the test used (r.Host lets this work regardless of
+		// which issuerURL a given test constructs).
+		if strings.HasSuffix(r.URL.Path, "/.well-known/openid-configuration") {
+			w.WriteHeader(200)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"jwks_uri": "http://" + r.Host + "/.well-known/jwks.json",
+			})
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/.well-known/jwks.json") {
 			w.WriteHeader(f.jwksStatus)
 			_, _ = w.Write([]byte(f.jwksBody))
 			return
@@ -168,7 +180,7 @@ func TestEnsureIdpCreatesProviderWhenAbsent(t *testing.T) {
 	settings := testSettings(t, nil)
 	issuerURL := server.URL + "/realms/demo"
 
-	err := EnsureIdp(context.Background(), "proj-1", "demo", issuerURL, "sts.googleapis.com", settings, KindOIDC, nil)
+	err := EnsureIdp(context.Background(), "proj-1", "demo", issuerURL, "sts.googleapis.com", settings, KindOIDC, "keycloak", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -176,7 +188,7 @@ func TestEnsureIdpCreatesProviderWhenAbsent(t *testing.T) {
 		t.Fatalf("expected 1 write call, got %+v", fake.calls)
 	}
 	call := fake.calls[0]
-	if call.query.Get("workloadIdentityPoolProviderId") != "test-cluster-demo-oidc" {
+	if call.query.Get("workloadIdentityPoolProviderId") != "test-cluster-demo-keycloak" {
 		t.Fatalf("unexpected provider id: %v", call.query)
 	}
 	oidcPayload := call.body["oidc"].(map[string]any)
@@ -192,6 +204,40 @@ func TestEnsureIdpCreatesProviderWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestEnsureIdpFetchesJWKSViaDiscoveryNotHardcodedKeycloakPath guards a real
+// bug confirmed live: fetchJWKS used to hardcode Keycloak's own JWKS path
+// (/protocol/openid-connect/certs), which 404s against Auth0 (JWKS at
+// /.well-known/jwks.json). Real OIDC discovery
+// (.well-known/openid-configuration -> jwks_uri) works uniformly across both.
+// This uses "auth0" as workloadProvider specifically to prove the fix
+// isn't Keycloak-specific — fakeGCPServer's discovery document is served at
+// a generic path with no Keycloak-specific assumptions baked in.
+func TestEnsureIdpFetchesJWKSViaDiscoveryNotHardcodedKeycloakPath(t *testing.T) {
+	withFakeGCPToken(t)
+	fake := newFakeGCPServer(t)
+	fake.jwksBody = `{"keys": [{"kid": "auth0-key"}]}`
+	fake.providerStatus = 404
+	server := fake.start()
+	defer server.Close()
+	withIAMAPIBase(t, server.URL)
+
+	settings := testSettings(t, map[string]string{
+		"AUTH0_DOMAIN":             "example.us.auth0.com",
+		"AUTH0_OPERATOR_CLIENT_ID": "operator-client-id",
+		"OPERATOR_PROVIDER":        "keycloak",
+	})
+	issuerURL := server.URL // Auth0's issuer has no realm-style path segment.
+
+	err := EnsureIdp(context.Background(), "proj-1", "demo", issuerURL, "aws-demo-portobello", settings, KindOIDC, "auth0", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	oidcPayload := fake.calls[0].body["oidc"].(map[string]any)
+	if oidcPayload["jwksJson"] != `{"keys": [{"kid": "auth0-key"}]}` {
+		t.Fatalf("expected JWKS fetched via discovery, got %v", oidcPayload["jwksJson"])
+	}
+}
+
 func TestEnsureIdpSkipsJWKSFetchAndUsesSubjectClaimForSpiffe(t *testing.T) {
 	withFakeGCPToken(t)
 	fake := newFakeGCPServer(t)
@@ -201,7 +247,7 @@ func TestEnsureIdpSkipsJWKSFetchAndUsesSubjectClaimForSpiffe(t *testing.T) {
 	withIAMAPIBase(t, server.URL)
 
 	settings := testSettings(t, nil)
-	err := EnsureIdp(context.Background(), "proj-1", "demo", "https://spire1-oidc.example.com", "myceliam-demo", settings, KindSpiffe, nil)
+	err := EnsureIdp(context.Background(), "proj-1", "demo", "https://spire1-oidc.example.com", "myceliam-demo", settings, KindSpiffe, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -229,7 +275,7 @@ func TestEnsureIdpUpdatesProviderWhenPresent(t *testing.T) {
 	withIAMAPIBase(t, server.URL)
 
 	settings := testSettings(t, nil)
-	err := EnsureIdp(context.Background(), "proj-1", "demo", server.URL+"/realms/demo", "sts.googleapis.com", settings, KindOIDC, nil)
+	err := EnsureIdp(context.Background(), "proj-1", "demo", server.URL+"/realms/demo", "sts.googleapis.com", settings, KindOIDC, "keycloak", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -248,7 +294,7 @@ func TestEnsureIdpUndeletesProviderWhenDeleted(t *testing.T) {
 	withIAMAPIBase(t, server.URL)
 
 	settings := testSettings(t, nil)
-	err := EnsureIdp(context.Background(), "proj-1", "demo", server.URL+"/realms/demo", "sts.googleapis.com", settings, KindOIDC, nil)
+	err := EnsureIdp(context.Background(), "proj-1", "demo", server.URL+"/realms/demo", "sts.googleapis.com", settings, KindOIDC, "keycloak", nil)
 	if _, ok := operr.AsTemporary(err); !ok {
 		t.Fatalf("expected *operr.Temporary, got %v", err)
 	}
@@ -259,7 +305,7 @@ func TestEnsureIdpUndeletesProviderWhenDeleted(t *testing.T) {
 
 func TestProviderIDTruncatesLongNamespaceReservingRoomForKindSuffix(t *testing.T) {
 	settings := testSettings(t, nil)
-	id := providerID(strings.Repeat("a", 40), KindSpiffe, settings)
+	id := providerID(strings.Repeat("a", 40), KindSpiffe, "", settings)
 	if len(id) > 32 {
 		t.Fatalf("expected id <= 32 chars, got %d: %s", len(id), id)
 	}
@@ -268,18 +314,52 @@ func TestProviderIDTruncatesLongNamespaceReservingRoomForKindSuffix(t *testing.T
 	}
 }
 
+// TestProviderIDTruncatesReservingRoomForLongestWorkloadProviderSuffix
+// guards the same truncation logic against "-keycloak" specifically —
+// longer than "-oidc"/"-spiffe" were, so worth its own check that room is
+// still correctly reserved before truncating the base.
+func TestProviderIDTruncatesReservingRoomForLongestWorkloadProviderSuffix(t *testing.T) {
+	settings := testSettings(t, nil)
+	id := providerID(strings.Repeat("a", 40), KindOIDC, "keycloak", settings)
+	if len(id) > 32 {
+		t.Fatalf("expected id <= 32 chars, got %d: %s", len(id), id)
+	}
+	if !strings.HasSuffix(id, "-keycloak") {
+		t.Fatalf("expected -keycloak suffix, got %s", id)
+	}
+}
+
 func TestProviderIDDiffersByKindForSameNamespace(t *testing.T) {
 	settings := testSettings(t, nil)
-	oidcID := providerID("demo", KindOIDC, settings)
-	spiffeID := providerID("demo", KindSpiffe, settings)
-	if oidcID != "test-cluster-demo-oidc" || spiffeID != "test-cluster-demo-spiffe" {
+	oidcID := providerID("demo", KindOIDC, "keycloak", settings)
+	spiffeID := providerID("demo", KindSpiffe, "", settings)
+	if oidcID != "test-cluster-demo-keycloak" || spiffeID != "test-cluster-demo-spiffe" {
 		t.Fatalf("unexpected ids: %s %s", oidcID, spiffeID)
+	}
+}
+
+// TestProviderIDDiffersByWorkloadProviderForSameNamespace guards a real bug
+// confirmed live: a single shared "<cluster>-<namespace>-oidc" WLI provider
+// across every OIDC-backed workload in a namespace meant whichever of
+// Keycloak/Auth0 reconciled last silently overwrote the others'
+// issuerUri, so a workload on the "losing" provider got an issuer mismatch
+// (invalid_grant) at GCP STS exchange time. Each workload provider must get
+// its own distinct provider ID.
+func TestProviderIDDiffersByWorkloadProviderForSameNamespace(t *testing.T) {
+	settings := testSettings(t, nil)
+	keycloakID := providerID("demo", KindOIDC, "keycloak", settings)
+	auth0ID := providerID("demo", KindOIDC, "auth0", settings)
+	if keycloakID == auth0ID {
+		t.Fatalf("expected distinct provider IDs per workload provider, got keycloak=%s auth0=%s", keycloakID, auth0ID)
+	}
+	if keycloakID != "test-cluster-demo-keycloak" || auth0ID != "test-cluster-demo-auth0" {
+		t.Fatalf("unexpected ids: keycloak=%s auth0=%s", keycloakID, auth0ID)
 	}
 }
 
 func TestProviderIDUsesClusterID(t *testing.T) {
 	settings := testSettings(t, map[string]string{"CLUSTER_ID": "other-cluster"})
-	if got := providerID("demo", KindOIDC, settings); got != "other-cluster-demo-oidc" {
+	if got := providerID("demo", KindOIDC, "keycloak", settings); got != "other-cluster-demo-keycloak" {
 		t.Fatalf("unexpected id: %s", got)
 	}
 }
@@ -292,7 +372,7 @@ func TestDeleteIdpIgnores404(t *testing.T) {
 	defer server.Close()
 	withIAMAPIBase(t, server.URL)
 
-	if err := DeleteIdp(context.Background(), "proj-1", "demo", testSettings(t, nil), KindOIDC, nil); err != nil {
+	if err := DeleteIdp(context.Background(), "proj-1", "demo", testSettings(t, nil), KindOIDC, "keycloak", nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -304,10 +384,29 @@ func TestDeleteIdpUsesKindScopedProviderID(t *testing.T) {
 	defer server.Close()
 	withIAMAPIBase(t, server.URL)
 
-	if err := DeleteIdp(context.Background(), "proj-1", "demo", testSettings(t, nil), KindSpiffe, nil); err != nil {
+	if err := DeleteIdp(context.Background(), "proj-1", "demo", testSettings(t, nil), KindSpiffe, "", nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(fake.calls) != 1 || !strings.HasSuffix(fake.calls[0].path, "/providers/test-cluster-demo-spiffe") {
+		t.Fatalf("unexpected calls: %+v", fake.calls)
+	}
+}
+
+// TestDeleteIdpUsesWorkloadProviderScopedProviderID guards the same bug as
+// TestProviderIDDiffersByWorkloadProviderForSameNamespace, but end to end
+// through DeleteIdp — deleting the Auth0 provider must not touch (or be
+// confused with) the Keycloak one.
+func TestDeleteIdpUsesWorkloadProviderScopedProviderID(t *testing.T) {
+	withFakeGCPToken(t)
+	fake := newFakeGCPServer(t)
+	server := fake.start()
+	defer server.Close()
+	withIAMAPIBase(t, server.URL)
+
+	if err := DeleteIdp(context.Background(), "proj-1", "demo", testSettings(t, nil), KindOIDC, "auth0", nil); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.calls) != 1 || !strings.HasSuffix(fake.calls[0].path, "/providers/test-cluster-demo-auth0") {
 		t.Fatalf("unexpected calls: %+v", fake.calls)
 	}
 }

@@ -3,15 +3,15 @@ package aws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/url"
+	"regexp"
 	"testing"
 
 	awssdk "github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iam/types"
 	"github.com/aws/smithy-go"
-
-	"myceliam/internal/operr"
 )
 
 func noSuchEntityErr() error {
@@ -34,6 +34,9 @@ type fakeIAM struct {
 	getRoleErr    error
 	updateCalls   []*iam.UpdateAssumeRolePolicyInput
 	updateErr     error
+
+	createRoleCalls []*iam.CreateRoleInput
+	createRoleErr   error
 }
 
 func (f *fakeIAM) GetOpenIDConnectProvider(ctx context.Context, params *iam.GetOpenIDConnectProviderInput, optFns ...func(*iam.Options)) (*iam.GetOpenIDConnectProviderOutput, error) {
@@ -77,6 +80,14 @@ func (f *fakeIAM) GetRole(ctx context.Context, params *iam.GetRoleInput, optFns 
 		return f.getRoleOutput, nil
 	}
 	return &iam.GetRoleOutput{Role: &types.Role{RoleName: params.RoleName}}, nil
+}
+
+func (f *fakeIAM) CreateRole(ctx context.Context, params *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
+	f.createRoleCalls = append(f.createRoleCalls, params)
+	if f.createRoleErr != nil {
+		return nil, f.createRoleErr
+	}
+	return &iam.CreateRoleOutput{Role: &types.Role{RoleName: params.RoleName}}, nil
 }
 
 func (f *fakeIAM) UpdateAssumeRolePolicy(ctx context.Context, params *iam.UpdateAssumeRolePolicyInput, optFns ...func(*iam.Options)) (*iam.UpdateAssumeRolePolicyOutput, error) {
@@ -148,7 +159,7 @@ func TestDeleteIdpDeletesProvider(t *testing.T) {
 	fake := &fakeIAM{}
 	withFakeIAM(t, fake)
 
-	err := DeleteIdp(context.Background(), "111111111111", "https://kc.example.com/realms/demo", testCreds())
+	err := DeleteIdp(context.Background(), "111111111111", "https://kc.example.com/realms/demo", nil, testCreds())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -165,8 +176,49 @@ func TestDeleteIdpNoopWhenAbsent(t *testing.T) {
 	fake := &fakeIAM{deleteErr: noSuchEntityErr()}
 	withFakeIAM(t, fake)
 
-	if err := DeleteIdp(context.Background(), "111111111111", "https://kc.example.com/realms/demo", testCreds()); err != nil {
+	if err := DeleteIdp(context.Background(), "111111111111", "https://kc.example.com/realms/demo", nil, testCreds()); err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestDeleteIdpRefusesWhenProtectedClientIDPresent guards a real live
+// incident: a shared-issuer IAM OIDC provider (Auth0's tenant-global issuer,
+// used by every namespace on that tenant plus the operator's own bootstrap
+// identity) was deleted outright once the last workload ServiceAccount in
+// ONE namespace stopped needing it — even though the operator's own
+// bootstrap client_id was still registered in the same provider's
+// ClientIDList. DeleteIdp must refuse (as a safe no-op, not an error) rather
+// than delete a provider a protected identity still depends on.
+func TestDeleteIdpRefusesWhenProtectedClientIDPresent(t *testing.T) {
+	fake := &fakeIAM{getOutput: &iam.GetOpenIDConnectProviderOutput{
+		ClientIDList: []string{"my-app", "myceliam-operator"},
+	}}
+	withFakeIAM(t, fake)
+
+	err := DeleteIdp(context.Background(), "111111111111", "https://dev-ngyf2gzgiq5odql1.us.auth0.com/", []string{"myceliam-operator"}, testCreds())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.deleteCalls) != 0 {
+		t.Fatalf("expected no delete call when a protected client_id is still present, got %d", len(fake.deleteCalls))
+	}
+}
+
+// TestDeleteIdpProceedsWhenProtectedClientIDAbsent proves the guard doesn't
+// over-refuse: a provider whose ClientIDList never contained any protected
+// identifier deletes normally.
+func TestDeleteIdpProceedsWhenProtectedClientIDAbsent(t *testing.T) {
+	fake := &fakeIAM{getOutput: &iam.GetOpenIDConnectProviderOutput{
+		ClientIDList: []string{"my-app"},
+	}}
+	withFakeIAM(t, fake)
+
+	err := DeleteIdp(context.Background(), "111111111111", "https://kc.example.com/realms/demo", []string{"myceliam-operator"}, testCreds())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.deleteCalls) != 1 {
+		t.Fatalf("expected 1 delete call when no protected client_id is present, got %d", len(fake.deleteCalls))
 	}
 }
 
@@ -193,7 +245,7 @@ func TestEnsureRoleTrustAddsStatementToEmptyPolicy(t *testing.T) {
 	}}}
 	withFakeIAM(t, fake)
 
-	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://kc.example.com/realms/demo", "myceliam-demo", "azp", "my-app", testCreds())
+	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://kc.example.com/realms/demo", "myceliam-demo", "azp", "my-app", "my-app", false, false, testCreds())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -208,7 +260,8 @@ func TestEnsureRoleTrustAddsStatementToEmptyPolicy(t *testing.T) {
 		t.Fatalf("expected 1 statement, got %d", len(doc.Statement))
 	}
 	stmt := doc.Statement[0]
-	if stmt.Effect != "Allow" || stmt.Action != "sts:AssumeRoleWithWebIdentity" {
+	action, _ := stmt.Action.([]any)
+	if stmt.Effect != "Allow" || len(action) != 1 || action[0] != "sts:AssumeRoleWithWebIdentity" {
 		t.Fatalf("unexpected statement: %+v", stmt)
 	}
 	// For the azp (Keycloak) path, aud must accept either the custom audience
@@ -225,14 +278,20 @@ func TestEnsureRoleTrustAddsStatementToEmptyPolicy(t *testing.T) {
 	}
 }
 
-func TestEnsureRoleTrustSpiffePathChecksAudAndSub(t *testing.T) {
+func TestEnsureRoleTrustSharedAudienceForcesStrictMatch(t *testing.T) {
 	fake := &fakeIAM{getRoleOutput: &iam.GetRoleOutput{Role: &types.Role{
 		RoleName:                 awssdk.String("role-a"),
 		AssumeRolePolicyDocument: trustPolicyWith(),
 	}}}
 	withFakeIAM(t, fake)
 
-	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://spire.example.com", "myceliam-demo", "sub", "spiffe://example.org/ns/demo/sa/my-app", testCreds())
+	// sharedAudience=true (e.g. a namespace-shared aud, used by every SA in
+	// the namespace) must force the strict aud+azp match even though
+	// subjectClaim=="azp" — audience alone no longer proves identity once
+	// it's shared. azpValue=="my-app" here too (client_id fixed to the SA
+	// name), so the aud OR-list just ends up containing the same value the
+	// strict azp key already requires.
+	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://sharedaud.example.com/issuer", "aws-cluster1-demo", "azp", "my-app", "my-app", true, false, testCreds())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -240,8 +299,77 @@ func TestEnsureRoleTrustSpiffePathChecksAudAndSub(t *testing.T) {
 	if err := json.Unmarshal([]byte(awssdk.ToString(fake.updateCalls[0].PolicyDocument)), &doc); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	cond := doc.Statement[0].Condition["StringEquals"]
-	if cond["spire.example.com:aud"] != "myceliam-demo" || cond["spire.example.com:sub"] != "spiffe://example.org/ns/demo/sa/my-app" {
+	cond := doc.Statement[0].Condition["ForAnyValue:StringEquals"]
+	aud, _ := cond["sharedaud.example.com/issuer:aud"].([]any)
+	if len(aud) != 2 || aud[0] != "aws-cluster1-demo" || aud[1] != "my-app" || cond["sharedaud.example.com/issuer:azp"] != "my-app" {
+		t.Fatalf("unexpected condition: %+v", cond)
+	}
+}
+
+// TestEnsureRoleTrustAcceptsAzpFoldedAudForAuth0 guards a real bug found
+// live: Auth0's client-credentials tokens always carry azp set to Auth0's
+// own dynamically-assigned client_id (unrelated to both the configured
+// audience and to subjectValue, the myceliam_service_account claim's
+// value), and AWS STS folds azp into its `:aud` policy-context key
+// regardless — so a trust statement matching `:aud` against the literal
+// audience string alone always got AccessDenied for Auth0-backed
+// ServiceAccounts, even though the myceliam_service_account condition
+// (identity proof) was satisfied.
+func TestEnsureRoleTrustAcceptsAzpFoldedAudForAuth0(t *testing.T) {
+	fake := &fakeIAM{getRoleOutput: &iam.GetRoleOutput{Role: &types.Role{
+		RoleName:                 awssdk.String("role-a"),
+		AssumeRolePolicyDocument: trustPolicyWith(),
+	}}}
+	withFakeIAM(t, fake)
+
+	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://dev-ngyf2gzgiq5odql1.us.auth0.com/", "aws-demo-portobello", "myceliam_service_account", "auth0-jwt", "Try9V7oOqq0kOknWl5JuHo6XQ6Ju8a65", true, true, testCreds())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var doc trustPolicyDocument
+	if err := json.Unmarshal([]byte(awssdk.ToString(fake.updateCalls[0].PolicyDocument)), &doc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	stmt := doc.Statement[0]
+	action, _ := stmt.Action.([]any)
+	if len(action) != 2 || action[0] != "sts:AssumeRoleWithWebIdentity" || action[1] != "sts:TagSession" {
+		t.Fatalf("expected sts:TagSession alongside sts:AssumeRoleWithWebIdentity, got %+v", stmt.Action)
+	}
+	cond := stmt.Condition["ForAnyValue:StringEquals"]
+	aud, _ := cond["dev-ngyf2gzgiq5odql1.us.auth0.com/:aud"].([]any)
+	if len(aud) != 2 || aud[0] != "aws-demo-portobello" || aud[1] != "Try9V7oOqq0kOknWl5JuHo6XQ6Ju8a65" {
+		t.Fatalf("expected aud to accept both the configured audience and Auth0's azp client_id, got %+v", cond["dev-ngyf2gzgiq5odql1.us.auth0.com/:aud"])
+	}
+	// Confirmed live: "<issuer>:myceliam_service_account" never matches (AWS
+	// doesn't expose a custom claim injected at runtime by an Action that
+	// way) — only "aws:RequestTag/myceliam_service_account" does, via the
+	// session-tags detour subjectClaimViaSessionTag=true selects.
+	if cond["aws:RequestTag/myceliam_service_account"] != "auth0-jwt" {
+		t.Fatalf("expected aws:RequestTag/myceliam_service_account identity condition, got %+v", cond)
+	}
+	if _, stillPresent := cond["dev-ngyf2gzgiq5odql1.us.auth0.com/:myceliam_service_account"]; stillPresent {
+		t.Fatalf("did not expect the non-working issuer-prefixed condition key, got %+v", cond)
+	}
+}
+
+func TestEnsureRoleTrustSpiffePathChecksAudAndSub(t *testing.T) {
+	fake := &fakeIAM{getRoleOutput: &iam.GetRoleOutput{Role: &types.Role{
+		RoleName:                 awssdk.String("role-a"),
+		AssumeRolePolicyDocument: trustPolicyWith(),
+	}}}
+	withFakeIAM(t, fake)
+
+	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://spire.example.com", "myceliam-demo", "sub", "spiffe://example.org/ns/demo/sa/my-app", "", false, false, testCreds())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var doc trustPolicyDocument
+	if err := json.Unmarshal([]byte(awssdk.ToString(fake.updateCalls[0].PolicyDocument)), &doc); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cond := doc.Statement[0].Condition["ForAnyValue:StringEquals"]
+	aud, _ := cond["spire.example.com:aud"].([]any)
+	if len(aud) != 1 || aud[0] != "myceliam-demo" || cond["spire.example.com:sub"] != "spiffe://example.org/ns/demo/sa/my-app" {
 		t.Fatalf("unexpected condition: %+v", cond)
 	}
 }
@@ -259,7 +387,7 @@ func TestEnsureRoleTrustPreservesOtherStatements(t *testing.T) {
 	}}}
 	withFakeIAM(t, fake)
 
-	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://kc.example.com/realms/demo", "myceliam-demo", "azp", "my-app", testCreds())
+	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://kc.example.com/realms/demo", "myceliam-demo", "azp", "my-app", "my-app", false, false, testCreds())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -287,7 +415,7 @@ func TestEnsureRoleTrustIsIdempotent(t *testing.T) {
 		Sid:       sid,
 		Effect:    "Allow",
 		Principal: map[string]any{"Federated": "arn:aws:iam::111111111111:oidc-provider/kc.example.com/realms/demo"},
-		Action:    "sts:AssumeRoleWithWebIdentity",
+		Action:    []any{"sts:AssumeRoleWithWebIdentity"},
 		Condition: map[string]map[string]any{
 			"ForAnyValue:StringEquals": {
 				"kc.example.com/realms/demo:aud": []any{"myceliam-demo", "my-app"},
@@ -300,7 +428,7 @@ func TestEnsureRoleTrustIsIdempotent(t *testing.T) {
 	}}}
 	withFakeIAM(t, fake)
 
-	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://kc.example.com/realms/demo", "myceliam-demo", "azp", "my-app", testCreds())
+	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://kc.example.com/realms/demo", "myceliam-demo", "azp", "my-app", "my-app", false, false, testCreds())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -309,13 +437,62 @@ func TestEnsureRoleTrustIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestEnsureRoleTrustRejectsMissingRole(t *testing.T) {
+// TestEnsureRoleTrustCreatesMissingRole guards the requested behavior
+// change: a role that doesn't exist yet is no longer a hard failure —
+// EnsureRoleTrust creates it with the web-identity trust statement as its
+// entire initial trust policy (no permissions attached, myceliam still only
+// ever manages trust).
+func TestEnsureRoleTrustCreatesMissingRole(t *testing.T) {
 	fake := &fakeIAM{getRoleErr: noSuchEntityErr()}
 	withFakeIAM(t, fake)
 
-	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://kc.example.com/realms/demo", "myceliam-demo", "azp", "my-app", testCreds())
-	if _, ok := operr.AsPermanent(err); !ok {
-		t.Fatalf("expected *operr.Permanent, got %v", err)
+	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://kc.example.com/realms/demo", "myceliam-demo", "azp", "my-app", "my-app", false, false, testCreds())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(fake.createRoleCalls) != 1 {
+		t.Fatalf("expected 1 CreateRole call, got %d", len(fake.createRoleCalls))
+	}
+	if len(fake.updateCalls) != 0 {
+		t.Fatalf("expected no UpdateAssumeRolePolicy call when creating a new role, got %d", len(fake.updateCalls))
+	}
+	call := fake.createRoleCalls[0]
+	if awssdk.ToString(call.RoleName) != "role-a" {
+		t.Fatalf("unexpected RoleName: %v", awssdk.ToString(call.RoleName))
+	}
+	var doc trustPolicyDocument
+	if err := json.Unmarshal([]byte(awssdk.ToString(call.AssumeRolePolicyDocument)), &doc); err != nil {
+		t.Fatalf("unexpected error unmarshaling policy: %v", err)
+	}
+	if len(doc.Statement) != 1 {
+		t.Fatalf("expected exactly 1 statement in the new role's trust policy, got %d: %+v", len(doc.Statement), doc.Statement)
+	}
+	aud, _ := doc.Statement[0].Condition["ForAnyValue:StringEquals"]["kc.example.com/realms/demo:aud"].([]any)
+	if len(aud) != 2 || aud[0] != "myceliam-demo" || aud[1] != "my-app" {
+		t.Fatalf("unexpected condition on newly-created role: %+v", doc.Statement[0].Condition)
+	}
+	// Confirmed live: AWS's CreateRole "description" field only accepts
+	// tab/LF/CR plus printable ASCII (0x20-0x7E) and the Latin-1 supplement
+	// (0xA1-0xFF) — an em dash or smart quote 400s with ValidationError
+	// regardless of how correct the trust policy itself is.
+	if desc := awssdk.ToString(call.Description); !awsDescriptionCharsetRe.MatchString(desc) {
+		t.Fatalf("Description contains characters AWS's CreateRole rejects: %q", desc)
+	}
+}
+
+var awsDescriptionCharsetRe = regexp.MustCompile("^[\t\n\r -~¡-ÿ]*$")
+
+
+// TestEnsureRoleTrustPropagatesCreateRoleError guards the other branch: a
+// real CreateRole failure (as opposed to NoSuchEntity from GetRole) must
+// still surface as an error, not be silently swallowed.
+func TestEnsureRoleTrustPropagatesCreateRoleError(t *testing.T) {
+	fake := &fakeIAM{getRoleErr: noSuchEntityErr(), createRoleErr: errors.New("boom")}
+	withFakeIAM(t, fake)
+
+	err := EnsureRoleTrust(context.Background(), "111111111111", "role-a", "https://kc.example.com/realms/demo", "myceliam-demo", "azp", "my-app", "my-app", false, false, testCreds())
+	if err == nil {
+		t.Fatal("expected an error when CreateRole fails")
 	}
 }
 

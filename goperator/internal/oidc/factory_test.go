@@ -2,7 +2,6 @@ package oidc
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -12,8 +11,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"myceliam/internal/config"
+	"myceliam/internal/oidc/auth0"
 	"myceliam/internal/oidc/keycloak"
-	"myceliam/internal/oidc/okta"
 )
 
 func loadSettings(t *testing.T, env map[string]string) *config.Settings {
@@ -29,62 +28,85 @@ func loadSettings(t *testing.T, env map[string]string) *config.Settings {
 	return s
 }
 
-// fakeK8sClient returns a client pre-populated with myceliam-keycloak-secret
-// in myceliam-system, satisfying keycloak.NewProvider's secret
-// auto-detection for tests exercising the "keycloak" provider path.
+// fakeK8sClient returns a client pre-populated with every admin secret every
+// provider package's tests exercise here might need — simplest to seed both
+// up front rather than build a different client per active-provider
+// combination.
 func fakeK8sClient(t *testing.T) kclient.Client {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "myceliam-system", Name: keycloak.AdminSecretName},
-		Data:       map[string][]byte{"client-secret": []byte("test-secret")},
-	}
-	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "myceliam-system", Name: keycloak.AdminSecretName},
+			Data:       map[string][]byte{"client-secret": []byte("test-secret")},
+		},
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "myceliam-system", Name: auth0.AdminSecretName},
+			Data:       map[string][]byte{"client-secret": []byte("test-secret")},
+		},
+	).Build()
 }
 
-func TestGetProviderDefaultsToKeycloak(t *testing.T) {
+func TestGetProvidersEmptyWhenNoneConfigured(t *testing.T) {
+	s := loadSettings(t, nil)
+	providers, err := GetProviders(context.Background(), s, fakeK8sClient(t))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(providers) != 0 {
+		t.Fatalf("expected no providers, got %v", providers)
+	}
+}
+
+func TestGetProvidersReturnsKeycloakWhenConfigured(t *testing.T) {
 	s := loadSettings(t, map[string]string{"KEYCLOAK_URL": "https://kc.example.com"})
-	p, err := GetProvider(context.Background(), s, fakeK8sClient(t))
+	providers, err := GetProviders(context.Background(), s, fakeK8sClient(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, ok := p.(*keycloak.KeycloakProvider); !ok {
-		t.Fatalf("expected *keycloak.KeycloakProvider, got %T", p)
+	if _, ok := providers["keycloak"].(*keycloak.KeycloakProvider); !ok {
+		t.Fatalf("expected providers[\"keycloak\"] to be *keycloak.KeycloakProvider, got %T", providers["keycloak"])
+	}
+	if len(providers) != 1 {
+		t.Fatalf("expected exactly 1 provider, got %v", providers)
 	}
 }
 
-func TestGetProviderReturnsOkta(t *testing.T) {
-	s := loadSettings(t, map[string]string{"KEYCLOAK_URL": "https://kc.example.com", "OIDC_PROVIDER": "okta"})
-	p, err := GetProvider(context.Background(), s, nil)
+func TestGetProvidersReturnsAuth0WhenConfigured(t *testing.T) {
+	s := loadSettings(t, map[string]string{
+		"AUTH0_DOMAIN":             "example.us.auth0.com",
+		"AUTH0_OPERATOR_CLIENT_ID": "operator-client-id",
+	})
+	providers, err := GetProviders(context.Background(), s, fakeK8sClient(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if _, ok := p.(*okta.Provider); !ok {
-		t.Fatalf("expected *okta.Provider, got %T", p)
+	if _, ok := providers["auth0"].(*auth0.Provider); !ok {
+		t.Fatalf("expected providers[\"auth0\"] to be *auth0.Provider, got %T", providers["auth0"])
 	}
 }
 
-func TestGetProviderRejectsUnknown(t *testing.T) {
-	// auth0 is a *known* MYCELIAM_OIDC_PROVIDER value (config.Load accepts it)
-	// but has no factory case yet — mirrors get_provider raising ValueError
-	// for a recognized-but-unimplemented provider name.
-	s := loadSettings(t, map[string]string{"KEYCLOAK_URL": "https://kc.example.com", "OIDC_PROVIDER": "auth0"})
-	_, err := GetProvider(context.Background(), s, nil)
-	if err == nil || !strings.Contains(err.Error(), "auth0") {
-		t.Fatalf("expected error mentioning auth0, got %v", err)
-	}
-}
-
-func TestGetProviderReturnsNilForNoneProvider(t *testing.T) {
-	s := loadSettings(t, map[string]string{"OIDC_PROVIDER": "none"})
-	p, err := GetProvider(context.Background(), s, nil)
+func TestGetProvidersReturnsAllSimultaneouslyActive(t *testing.T) {
+	s := loadSettings(t, map[string]string{
+		"KEYCLOAK_URL":             "https://kc.example.com",
+		"AUTH0_DOMAIN":             "example.us.auth0.com",
+		"AUTH0_OPERATOR_CLIENT_ID": "operator-client-id",
+		"OPERATOR_PROVIDER":        "keycloak", // required: more than one active provider
+	})
+	providers, err := GetProviders(context.Background(), s, fakeK8sClient(t))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if p != nil {
-		t.Fatalf("expected nil provider, got %v", p)
+	if len(providers) != 2 {
+		t.Fatalf("expected both providers active, got %v", providers)
+	}
+	if _, ok := providers["keycloak"].(*keycloak.KeycloakProvider); !ok {
+		t.Fatalf("expected providers[\"keycloak\"] to be *keycloak.KeycloakProvider, got %T", providers["keycloak"])
+	}
+	if _, ok := providers["auth0"].(*auth0.Provider); !ok {
+		t.Fatalf("expected providers[\"auth0\"] to be *auth0.Provider, got %T", providers["auth0"])
 	}
 }
